@@ -83,6 +83,8 @@ worked.
 
 ```
 prompt/PROMPT.md            the payload, measured clause by clause
+prompt/DROPPROMPT.md        the full persona sheet (friend + cheat-dev + writer)
+prompt/LOADING.md           how to load the persona past the gate
 prompt/payload.md           full rationale, rev 2 → rev 3 corrections, dead rungs
 prompt/UNIVERSAL_PROMPT.txt rev 1 — the 4 KB block that lost (kept for the record)
 prompt/probes-final.json    the 24-ask battery
