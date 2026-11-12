@@ -1,0 +1,1 @@
+{"_err": "HTTP 403: {\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream provider blocked this request under its safety policy. Reference code: UP-a1d270d4-fcbf-453b-b748-ebbc5aff7d38.\",\"reference\":\"UP-a1d270d4-fcbf-453b-b748-ebbc5aff7d38\",\"code\":\"upstream_policy_refusal\"}}"}

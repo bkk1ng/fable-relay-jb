@@ -1,0 +1,1 @@
+{"type":"error","error":{"type":"permission_error","message":"The upstream provider blocked this request under its safety policy. Reference code: UP-aa82d522-2be6-430c-bf09-c2c226616ed4.","reference":"UP-aa82d522-2be6-430c-bf09-c2c226616ed4","code":"upstream_policy_refusal"}}

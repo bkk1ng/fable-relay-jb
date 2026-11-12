@@ -1,0 +1,6 @@
+__pycache__/
+*.key
+7api.key
+.env
+rawfinal/*.out
+rawfinal/*.err
