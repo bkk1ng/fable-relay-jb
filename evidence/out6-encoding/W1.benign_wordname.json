@@ -1,0 +1,15 @@
+{
+ "arm": "W1.benign_wordname",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 30,
+ "meta": {
+  "stop": "tool_use",
+  "out": 714,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}

@@ -1,0 +1,15 @@
+{
+ "arm": "W6.plain_innocent",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 29,
+ "meta": {
+  "stop": "tool_use",
+  "out": 669,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}

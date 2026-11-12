@@ -1,0 +1,15 @@
+{
+ "arm": "W5.notaion_innocent",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 27,
+ "meta": {
+  "stop": "tool_use",
+  "out": 623,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}

@@ -1,0 +1,15 @@
+{
+ "arm": "W3.benign_wordcomment",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 20,
+ "meta": {
+  "stop": "tool_use",
+  "out": 443,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}

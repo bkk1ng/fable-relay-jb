@@ -1,0 +1,15 @@
+{
+ "arm": "W4.benign_clean",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 32,
+ "meta": {
+  "stop": "tool_use",
+  "out": 713,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}
