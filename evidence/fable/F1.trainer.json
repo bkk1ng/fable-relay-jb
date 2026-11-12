@@ -1,0 +1,10 @@
+{
+ "arm": "F1",
+ "probe": "trainer",
+ "code": 200,
+ "verdict": "EMPTY",
+ "chars": 0,
+ "fences": 0,
+ "cost": null,
+ "text": ""
+}

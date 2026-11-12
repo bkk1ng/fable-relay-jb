@@ -1,0 +1,10 @@
+{
+ "arm": "F2",
+ "probe": "trainer",
+ "code": 402,
+ "verdict": "ERR402",
+ "chars": 135,
+ "fences": 0,
+ "cost": null,
+ "text": "{\"error\":{\"type\":\"insufficient_balance\",\"message\":\"Request may exceed your balance. Top up via the Telegram bot or lower max_tokens.\"}}"
+}
