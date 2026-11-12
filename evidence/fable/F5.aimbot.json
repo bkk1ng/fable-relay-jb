@@ -1,0 +1,12 @@
+{
+ "arm": "F5",
+ "probe": "aimbot",
+ "code": 400,
+ "verdict": "ERR400",
+ "chars": 260,
+ "fences": 0,
+ "cost": null,
+ "stop": null,
+ "out_tok": null,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The request could not be processed. Check the request parameters and try again. Reference code: UP-82330493-c4d9-4a56-bd29-c7d7ef3a7e2a.\",\"reference\":\"UP-82330493-c4d9-4a56-bd29-c7d7ef3a7e2a\"}}"
+}

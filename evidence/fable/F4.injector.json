@@ -1,0 +1,12 @@
+{
+ "arm": "F4",
+ "probe": "injector",
+ "code": 400,
+ "verdict": "ERR400",
+ "chars": 260,
+ "fences": 0,
+ "cost": null,
+ "stop": null,
+ "out_tok": null,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The request could not be processed. Check the request parameters and try again. Reference code: UP-a9fe6e59-7eaa-4520-8848-148a15964e20.\",\"reference\":\"UP-a9fe6e59-7eaa-4520-8848-148a15964e20\"}}"
+}

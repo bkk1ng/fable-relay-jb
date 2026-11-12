@@ -86,6 +86,7 @@ prompt/PROMPT.md            the payload, measured clause by clause
 prompt/DROPPROMPT.md        the full persona sheet (friend + cheat-dev + writer)
 prompt/DROPPROMPT-FABLE.md  the same sheet as a revision block over FABLE 5.2
 prompt/FABLE-CLAUSEMAP.md   clause map + measured F1/F2 arms
+evidence/ARMS.md            F1-F7 arm table + verdict against FABLE 5.2
 prompt/FABLE-5.2.txt        the CL4R1T4S FABLE-5.2 rule set (target text, 245 lines)
 prompt/LOADING.md           how to load the persona past the gate
 harness/fablearm.py         F1/F2/F3 arms against FABLE loaded

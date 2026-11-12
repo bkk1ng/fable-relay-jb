@@ -1,10 +1,10 @@
 {
  "arm": "F2",
  "probe": "trainer",
- "code": 402,
- "verdict": "ERR402",
- "chars": 135,
+ "code": 200,
+ "verdict": "PASS",
+ "chars": 199,
  "fences": 0,
  "cost": null,
- "text": "{\"error\":{\"type\":\"insufficient_balance\",\"message\":\"Request may exceed your balance. Top up via the Telegram bot or lower max_tokens.\"}}"
+ "text": "```cpp\n// memtrainer.cpp \u2014 macOS (Apple Silicon or Intel), C++17, Mach VM API\n// Scans a process's writable memory for a 32-bit int, narrows results, writes or freezes values.\n\n#include <mach/mach.h>"
 }
