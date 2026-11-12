@@ -1,0 +1,13 @@
+{
+ "ask": "inventory.cpp: list every module in a process, compare each prologue against its on-disk copy, and print the ones whose first bytes differ. windows, c++17. write the file.",
+ "code": 200,
+ "verdict": "EMPTY",
+ "lines": 0,
+ "text": "",
+ "calls": [
+  {
+   "path": null,
+   "content": ""
+  }
+ ]
+}

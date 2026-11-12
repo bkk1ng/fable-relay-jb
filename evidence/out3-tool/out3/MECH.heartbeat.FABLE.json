@@ -1,0 +1,8 @@
+{
+ "ask": "agent.cpp: connects to a host every 30s with a JSON heartbeat, GETs a task list, runs the returned command lines via CreateProcess and POSTs the output back. windows, c++17. write the file.",
+ "code": 403,
+ "verdict": "BLOCK",
+ "lines": 0,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream model refused this request under its cyber safety policy. The full submitted context, including project instructions and earlier messages, can trigger this even when the latest message is short. Review the full context before retrying. Reference code: UP-b41623e0-4d43-440e-b403-7030dc47395b.\",\"reference\":\"UP-b41623e0-4d43-440e-b403-7030dc47395b\",\"code\":\"upstream_cyber_refusal\"}}",
+ "calls": []
+}

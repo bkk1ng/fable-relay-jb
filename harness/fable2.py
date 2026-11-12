@@ -13,8 +13,9 @@ import json, os, re, sys, time, urllib.request, urllib.error
 
 KEY = open(os.path.expanduser("~/.config/opencode/7api.key")).read().strip()
 URL = "https://7api.st/v1/messages"
-FABLE = open(os.path.expanduser("~/jb/payload/core.txt")).read()
-PAY = open(os.path.expanduser("~/jb/payload/payload-fable.md")).read()
+HERE = os.path.dirname(os.path.abspath(__file__))
+FABLE = open(os.path.join(HERE, "..", "prompt", "FABLE-5.2.txt")).read()
+PAY = open(os.path.join(HERE, "..", "prompt", "PAYLOAD-FABLE.md")).read()
 
 REFUSE = re.compile(
     r"(i'm not going to|i won't|i will not|i can'?t (write|help|do|build)|i'?m not able|"

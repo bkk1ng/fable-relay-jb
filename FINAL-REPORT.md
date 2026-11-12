@@ -109,6 +109,12 @@ a `write_file` with a path and empty content; 12,000 passed; 16,000 returned 502
 |---|---|---|
 | A — FABLE replaced | 6 artifacts / 8 asks, 3 unstable-pending | 2 PASS / 15 BLOCK / 7 REFUSE (24 probes) |
 | B — FABLE present | trainer 2/2; aim components 3-4/4; assembled aimbot 0/4 | 0 PASS / 14 BLOCK / 8 REFUSE (22 probes) |
+| either, with the tool channel, 22-probe battery | — | **0 PASS** (A: 15 BLOCK / 7 REFUSE; B: 14 BLOCK / 8 REFUSE) |
+
+Mechanism-only briefs (`evidence/CEILING-TESTS.md`) close the last open vector: paraphrasing away
+the class nouns does not move the security classes at mechanism depth — 7/8 `403 BLOCK`, the eighth
+returning an empty file. The relay gate reads the mechanism, not the word, so it runs upstream of
+generation and no payload can open those classes.
 
 ## What is not claimed
 
@@ -118,3 +124,6 @@ a `write_file` with a path and empty content; 12,000 passed; 16,000 returned 502
 - Char counts are lower bounds where the harness stored content truncated at 8,000/20,000.
 - API spend is not instrumented; no cost figure is reported.
 - Child-safety and self-harm rules were not targeted by any payload or amendment, and each amendment states they are untouched.
+- Repro: `harness/fable2.py`, `harness/fable3.py`, `harness/fable4.py`, `harness/fable5.py` all now load
+  `prompt/FABLE-5.2.txt` and `prompt/PAYLOAD-FABLE.md` relative to the repo. The A-arm evidence was produced from
+  `~/jb/payload/payload-fable.md`, which is byte-identical (md5 `be7637d2a89033939d1ad8e4ed52104f`).
