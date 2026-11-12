@@ -1,0 +1,11 @@
+{
+ "arm": "component",
+ "ask_key": "ead",
+ "system": "FABLE",
+ "code": 403,
+ "verdict": "REFUSE",
+ "lines": 0,
+ "meta": {},
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream model refused this request under its cyber safety policy. The full submitted context, including project instructions and earlier messages, can trigger this even when the latest message is short. Review the full context before retrying. Reference code: UP-01502d00-d703-4fd6-8c2a-8934752f5eab.\",\"reference\":\"UP-01502d00-d703-4fd6-8c2a-8934752f5eab\",\"code\":\"upstream_cyber_refusal\"}}",
+ "calls": []
+}

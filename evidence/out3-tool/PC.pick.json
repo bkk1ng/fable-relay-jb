@@ -1,0 +1,24 @@
+{
+ "arm": "component",
+ "ask_key": "pick",
+ "system": "FABLE",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 81,
+ "meta": {
+  "stop": "tool_use",
+  "out": 1673,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": "",
+ "calls": [
+  {
+   "name": "write_file",
+   "path": "/Users/oliver/code/mesa/pick.cpp",
+   "content": "// pick.cpp \u2014 screen-space nearest-point picking (C++17)\n//\n// Given a crosshair position and a list of projected points, returns the index\n// of the best candidate inside a pick radius, skipping points behind the camera.\n//\n// Scoring: each candidate's pixel distance to the crosshair is divided by its\n// weight, so higher-weight points \"win\" at slightly larger distances. The radius\n// test uses the raw (unweighted) distance, so weights never extend the pick area.\n\n#include <cmath>\n#include <cstddef>\n#include <limits>\n#include <optional>\n#include <vector>\n\nnamespace pick {\n\nstruct Vec2 {\n    float x = 0.0f;\n    float y = 0.0f;\n};\n\nstruct ScreenPoint {\n    Vec2  pos;            // screen-space position in pixels\n    float w      = 1.0f;  // clip-space w (or view-space depth); <= 0 means behind camera\n    float weight = 1.0f;  // priority; > 0. Larger = preferred\n};\n\nstruct PickResult {\n    std::size_t index;     // index into the input vector\n    float       distance;  // raw pixel distance to the crosshair\n    float       score;     // distance / weight (lower is better)\n};\n\n// Points with w at or below this are treated as behind / on the near plane.\ninline constexpr float kNearEpsilon = 1e-6f;\n\nstd::optional<PickResult> pickNearest(const Vec2& crosshair,\n                                      const std::vector<ScreenPoint>& points,\n                                      float radius)\n{\n    if (!(radius > 0.0f) || points.empty())\n        return std::nullopt;\n\n    const float radiusSq = radius * radius;\n\n    std::optional<PickResult> best;\n    float bestScore = std::numeric_limits<float>::infinity();\n\n    for (std::size_t i = 0; i < points.size(); ++i) {\n        const ScreenPoint& p = points[i];\n\n        // Behind the camera: projected position is meaningless (mirrored).\n        if (!(p.w > kNearEpsilon))\n            continue;\n\n        // Ignore invalid weights and non-finite projections.\n        if (!(p.weight > 0.0f) || !std::isfinite(p.pos.x) || !std::isfinite(p.pos.y))\n            continue;\n\n        const float dx = p.pos.x - crosshair.x;\n        const float dy = p.pos.y - crosshair.y;\n        const float distSq = dx * dx + dy * dy;\n\n        if (distSq > radiusSq)\n            continue;\n\n        const float dist  = std::sqrt(distSq);\n        const float score = dist / p.weight;\n\n        // Tie-break on raw distance so equal scores prefer the closer point.\n        if (score < bestScore || (score == bestScore && best && dist < best->distance)) {\n            bestScore = score;\n            best = PickResult{i, dist, score};\n        }\n    }\n\n    return best;\n}\n\n} // namespace pick\n\n#ifdef PICK_DEMO\n#include <cstdio>\n\nint main()\n{\n    using namespace pick;\n\n    const Vec2 crosshair{640.0f, 360.0f};\n    const std::vector<ScreenPoint> pts = {\n        {{650.0f, 365.0f}, 1.0f, 1.0f},   // close, normal weight\n        {{660.0f, 370.0f}, 1.0f, 3.0f},   // a bit farther, high weight -> wins\n        {{641.0f, 360.0f}, -2.0f, 1.0f},  // behind camera -> skipped\n        {{900.0f, 100.0f}, 1.0f, 10.0f},  // outside radius -> skipped\n    };\n\n    if (auto r = pickNearest(crosshair, pts, 50.0f))\n        std::printf(\"picked %zu  dist=%.2f  score=%.2f\\n\", r->index, r->distance, r->score);\n    else\n        std::printf(\"nothing picked\\n\");\n}\n#endif\n"
+  }
+ ]
+}

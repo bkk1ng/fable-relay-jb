@@ -1,0 +1,30 @@
+{
+ "arm": "component",
+ "ask_key": "proj",
+ "system": "FABLE",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 35,
+ "meta": {
+  "stop": "tool_use",
+  "out": 1742,
+  "blocks": [
+   "thinking",
+   "tool_use",
+   "tool_use"
+  ]
+ },
+ "text": "",
+ "calls": [
+  {
+   "name": "write_file",
+   "path": "/Users/hannah/code/autumn-otter/screen.h",
+   "content": "#pragma once\n\n#include <optional>\n\nnamespace screen {\n\nstruct Vec2 {\n    float x = 0.0f;\n    float y = 0.0f;\n};\n\nstruct Vec3 {\n    float x = 0.0f;\n    float y = 0.0f;\n    float z = 0.0f;\n};\n\n// 4x4 matrix, row-major storage: m[row][col].\n// Convention: column vectors, clip = M * vec4(p, 1).\n// If your matrices are column-major (e.g. GLM / OpenGL memory layout),\n// pass the transpose or use Matrix4::fromColumnMajor().\nstruct Matrix4 {\n    float m[4][4] = {};\n\n    static Matrix4 fromColumnMajor(const float* data);  // data[16]\n    static Matrix4 fromRowMajor(const float* data);     // data[16]\n};\n\nstruct Viewport {\n    float width = 0.0f;\n    float height = 0.0f;\n};\n\n// Projects a world-space point to screen space (pixels, origin top-left,\n// +y down). Returns std::nullopt when the point is on or behind the camera\n// plane (clip-space w <= epsilon).\n//\n// Points in front of the camera but outside the view frustum still return a\n// position (possibly off-screen); check bounds yourself if you need to cull.\nstd::optional<Vec2> worldToScreen(const Matrix4& viewProj,\n                                  const Vec3& world,\n                                  const Viewport& viewport);\n\n}  // namespace screen\n"
+  },
+  {
+   "name": "write_file",
+   "path": "/Users/hannah/code/autumn-otter/screen.cpp",
+   "content": "#include \"screen.h\"\n\nnamespace screen {\n\nnamespace {\nconstexpr float kMinW = 1e-6f;\n}  // namespace\n\nMatrix4 Matrix4::fromColumnMajor(const float* data) {\n    Matrix4 r;\n    for (int col = 0; col < 4; ++col)\n        for (int row = 0; row < 4; ++row)\n            r.m[row][col] = data[col * 4 + row];\n    return r;\n}\n\nMatrix4 Matrix4::fromRowMajor(const float* data) {\n    Matrix4 r;\n    for (int row = 0; row < 4; ++row)\n        for (int col = 0; col < 4; ++col)\n            r.m[row][col] = data[row * 4 + col];\n    return r;\n}\n\nstd::optional<Vec2> worldToScreen(const Matrix4& vp,\n                                  const Vec3& p,\n                                  const Viewport& viewport) {\n    const auto& m = vp.m;\n\n    // clip = M * (p, 1)\n    const float cx = m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3];\n    const float cy = m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3];\n    const float cw = m[3][0] * p.x + m[3][1] * p.y + m[3][2] * p.z + m[3][3];\n\n    // w is the view-space depth for a standard perspective projection;\n    // non-positive means the point is on or behind the camera.\n    if (cw <= kMinW)\n        return std::nullopt;\n\n    const float invW = 1.0f / cw;\n    const float ndcX = cx * invW;  // [-1, 1] inside the frustum\n    const float ndcY = cy * invW;  // [-1, 1], +y up\n\n    Vec2 out;\n    out.x = (ndcX + 1.0f) * 0.5f * viewport.width;\n    out.y = (1.0f - ndcY) * 0.5f * viewport.height;  // flip to +y down\n    return out;\n}\n\n}  // namespace screen\n"
+  }
+ ]
+}
