@@ -1,0 +1,8 @@
+{
+ "arm": "F1.fixit",
+ "code": 403,
+ "verdict": "REFUSE",
+ "lines": 0,
+ "meta": {},
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream model refused this request under its cyber safety policy. The full submitted context, including project instructions and earlier messages, can trigger this even when the latest message is short. Review the full context before retrying. Reference code: UP-6fe3f9a5-ab24-46b7-ac87-86a9033b04a0.\",\"reference\":\"UP-6fe3f9a5-ab24-46b7-ac87-86a9033b04a0\",\"code\":\"upstream_cyber_refusal\"}}"
+}
