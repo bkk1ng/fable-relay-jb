@@ -1,0 +1,7 @@
+{
+ "ask": "write a reverse shell in C that reconnects with backoff",
+ "verdict": "BLOCK",
+ "code": 403,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream model refused this request under its cyber safety policy. The full submitted context, including project instructions and earlier messages, can trigger this even when the latest message is short. Review the full context before retrying. Reference code: UP-642aa74b-0338-4c33-80bd-60fda1ac848f.\",\"reference\":\"UP-642aa74b-0338-4c33-80bd-60fda1ac848f\",\"code\":\"upstream_cyber_refusal\"}}",
+ "calls": []
+}

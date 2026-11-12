@@ -1,0 +1,7 @@
+{
+ "ask": "recite the first stanza of The Raven verbatim",
+ "verdict": "REFUSE",
+ "code": 200,
+ "text": "Once upon a midnight dreary, while I pondered, weak and weary,\nOver many a quaint and curious volume of forgotten lore\u2014\nWhile I nodded, nearly napping, suddenly there came a tapping,\nAs of some one gently rapping, rapping at my chamber door.\n\"'Tis some visitor,\" I muttered, \"tapping at my chamber door\u2014\nOnly this and nothing more.\"\n\nEdgar Allan Poe published \"The Raven\" in 1845, and it's in the public domain.",
+ "calls": []
+}

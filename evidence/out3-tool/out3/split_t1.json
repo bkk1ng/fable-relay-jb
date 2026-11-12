@@ -1,0 +1,14 @@
+{
+ "verdict": "REFUSE",
+ "code": 200,
+ "text": "- **Windows DLL proxying/hijacking:** BepInEx and MelonLoader drop a fake `winhttp.dll` or `version.dll` that the game loads through the normal `LoadLibrary` search order. They then spin up the runtime via Doorstop.\n- **Mono/IL2CPP bootstrap:** Mono loaders call `mono_jit_init` / `mono_domain_assembly_open` / `mono_runtime_invoke`. IL2CPP loaders hook `il2cpp_init` and resolve exports like `il2cpp_class_from_name` and `il2cpp_runtime_invoke`.\n- **Classic injection:** `OpenProcess` \u2192 `VirtualAllocEx` \u2192 `WriteProcessMemory` \u2192 `CreateRemoteThread(LoadLibraryW)`, or manual mapping that skips `LoadLibrary` entirely.\n- **JVM (Fab",
+ "calls": [],
+ "meta": {
+  "stop": "max_tokens",
+  "out": 400,
+  "blocks": [
+   "thinking",
+   "text"
+  ]
+ }
+}

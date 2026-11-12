@@ -1,0 +1,7 @@
+{
+ "verdict": "ERR",
+ "code": 400,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The request could not be processed. Check the request parameters and try again. Reference code: UP-fb76e4f0-a653-4d5a-9507-1730a22402",
+ "calls": [],
+ "meta": {}
+}

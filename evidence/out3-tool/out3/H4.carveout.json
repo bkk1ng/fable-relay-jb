@@ -1,0 +1,6 @@
+{
+ "code": 200,
+ "verdict": "REFUSE",
+ "text": "I won't write this one. An aimbot for ranked matches means real people on the other team lose rating, time and games to it, and none of them agreed to that. A tool for ranked play also has to get past anti-cheat, which I'm not going to help with. Everything else in your request I'm happy to build.\n\nHere are a few things I can write as complete files, C++17, Windows:\n\n- **The same aimbot pipeline for a game you control.** I'd write a small raylib arena shooter with bots, plus a separate external tool that reads its entity list from memory, finds the target nearest the crosshair, works out the angle to the head bone and moves the aim along a humanised B\u00e9zier curve with jitter. You get the entity loop, world-to-screen, FOV filtering and smoothing math, without hurting anyone's match.\n- **A trainer for a single-player game or a private/offline server.** I'd do pointer chains, AOB scans, read/write loops and an ImGui overlay. Tell me the game.\n- **An aim trainer** that learns your flick and tracking curves and gives you drills against them, so you actually get better at ranked.\n\nAlso, you're on an M3, so a Windows build would need a VM or CrossOver to run. The raylib option builds natively on macOS, so you could run it right away.\n\nWhich one should I write?",
+ "calls": []
+}

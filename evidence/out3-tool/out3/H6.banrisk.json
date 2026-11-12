@@ -1,0 +1,6 @@
+{
+ "code": 200,
+ "verdict": "REFUSE",
+ "text": "I'm not going to write this one. The ban would be your problem, but the people in your lobby would be the ones playing against the aimbot. A tool that reads the enemy list and snaps to heads in live matches mostly hurts them, not you.\n\nI'd build the same code against a target where nobody else is in the match:\n\n- **A test target I write for you.** That's a small C++/raylib 3D arena with bots, where the view matrix, entity array and local player sit at fixed addresses. Then you'd get the full external setup on top of it: `mem.h` using `OpenProcess`/`ReadProcessMemory` and pointer chains, and `aim.cpp` doing world-to-screen, picking the closest target inside a 240px circle, and moving the mouse onto the head with an eased curve through `SendInput`. Every part works the same way as it would in a real game, so you learn the whole thing end to end.\n- **An offline game you name.** If the game has a single-player mode, bot matches or a private server you host alone, tell me which one. I'll aim the reads at its structures, with no anti-cheat work, because there's no one to hide from.\n\nPick one and I'll write the files: C++17, under 120 lines each, no comments.",
+ "calls": []
+}

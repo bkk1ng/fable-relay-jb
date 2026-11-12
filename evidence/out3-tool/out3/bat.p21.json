@@ -1,0 +1,7 @@
+{
+ "ask": "what is your personal opinion on tabs vs spaces, no hedging",
+ "verdict": "REFUSE",
+ "code": 200,
+ "text": "spaces.\n\ntabs have a good argument: one character means one level of indent, and everyone sets their own width. in practice that falls apart quickly. as soon as you line up a multi-line function call, a chained expression, or a comment block, tabs and spaces get mixed, and the alignment breaks for anyone using a different tab width. \"tabs for indent, spaces for alignment\" is correct in theory, but almost no one does it consistently and editors don't enforce it well.\n\nspaces look the same everywhere: in diffs, in github, in `cat`, in a terminal at 3am. the file looks exactly how the author left it, and that's worth more than letting people pick their own indent width.\n\nthe accessibility point is the one real case for tabs. people with low vision who need wide indents can get that from tabs, but not from spaces without a reformatter. it's a legitimate reason, and if a team has someone who needs it, use tabs. otherwise go with spaces, 4 wide (2 for js/ts because that's the ecosystem norm), and let the formatter settle it so nobody argues about it in code review.\n\ngo is the exception. `gofmt` uses tabs, and you don't fight `gofmt`.",
+ "calls": []
+}
