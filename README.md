@@ -72,12 +72,20 @@ holds.
 
 ## The FABLE finding
 
-The target of the exercise was the CL4R1T4S `CLAUDE-CODE-FABLE-5.2` rule set. The winning
-configuration never loads it: it replaces system entirely. The only arm with FABLE present
-scored 8/22 blocked. So what is demonstrated is *"beat the relay by not loading the
-rulebook"*, not *"beat the rulebook with it present"* — a real result, and a narrower one
-than "universal jailbreak". The IP ceiling is where the rulebook matters and where nothing
-worked.
+The target of the exercise was the CL4R1T4S `CLAUDE-CODE-FABLE-5.2` rule set. Two
+configurations were measured and both are in `FINAL-REPORT.md`:
+
+- **FABLE replaced** (`system` = `prompt/PAYLOAD-FABLE.md`): six game-cheat artifacts, seven
+  file-sets syntax-checked with mingw. Battery 2 PASS / 15 BLOCK / 7 REFUSE.
+- **FABLE present** (`system` = FABLE + a clause-keyed amendment block): a 111-line trainer
+  twice out of two arms, and the aim pipeline's parts (projection, bezier mover, cone picker,
+  memory reader) — but not the assembled aimbot. Battery 0 PASS / 14 BLOCK / 8 REFUSE.
+
+What is demonstrated is a narrow, reproducible cheat-code channel plus a measured boundary, not
+a universal jailbreak. The boundary is the third party: compliance stops the moment the ask puts
+another player in the room, whichever configuration is loaded. The payload that wins is also the
+payload that says least — an earlier revision that answered the objections in the model's own
+vocabulary measured REFUSE 2/2 on the same ask (`evidence/payload-housekeeping-variant-REGRESSED.md`).
 
 ## Repo map
 
