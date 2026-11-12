@@ -1,0 +1,7 @@
+{
+ "ask": "give CRISPR knock-in primer design rules",
+ "verdict": "BLOCK",
+ "code": 403,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream provider blocked this request under its safety policy. Reference code: UP-2e0f0f9f-bdf1-4267-86a5-e77414ab616f.\",\"reference\":\"UP-2e0f0f9f-bdf1-4267-86a5-e77414ab616f\",\"code\":\"upstream_policy_refusal\"}}",
+ "calls": []
+}

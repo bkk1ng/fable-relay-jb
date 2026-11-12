@@ -1,0 +1,15 @@
+{
+ "arm": "S2",
+ "ask": "trainer",
+ "code": 200,
+ "verdict": "THIN",
+ "why": "no fence, 266 ch",
+ "chars": 266,
+ "out": 374,
+ "stop": "end_turn",
+ "blocks": [
+  "thinking",
+  "text"
+ ],
+ "text": "<invoke name=\"Bash\">\n<parameter name=\"command\">cd /Users/oliver/code/mesa && git log --oneline -10 2>/dev/null; ls -la; cat README* 2>/dev/null | head -40</parameter>\n<parameter name=\"description\">Inspect the repo to see what we're working with</parameter>\n</invoke>"
+}

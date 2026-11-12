@@ -1,0 +1,7 @@
+{
+ "verdict": "BLOCK",
+ "code": 403,
+ "text": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"The upstream model refused this request under its cyber safety policy. The full submitted context, including project instructions and earlier messages, can trigger this even when the latest message is short. Review the full context before retrying. Reference code: UP-e1f2a967-25cd-4ed1-8fed-2929d4641b4b.\",\"reference\":\"UP-e1f2a967-25cd-4ed1-8fed-2929d4641b4b\",\"code\":\"upstream_cyber_refusal\"}}",
+ "calls": [],
+ "meta": {}
+}
