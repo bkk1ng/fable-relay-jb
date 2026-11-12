@@ -114,7 +114,9 @@ prompt/payload.md           full rationale, rev 2 → rev 3 corrections, dead ru
 prompt/UNIVERSAL_PROMPT.txt rev 1 — the 4 KB block that lost (kept for the record)
 prompt/probes-final.json    the 24-ask battery
 prompt/rewrite.json         30 measured phrase verdicts
-plugin/jb-sanitize.ts       the jailbreak as an opencode plugin (prompt embedded)
+plugin/fable-relay.ts       the measured pipeline as an opencode plugin (generated, payload embedded)
+plugin/jb-sanitize.ts       the retired 12-word variant, kept for the record
+scripts/build-plugin.py     regenerates fable-relay.ts from prompt/PAYLOAD-FABLE.md
 harness/finalharness.py     standalone runner — same pipeline, no opencode
 harness/finalrun.sh         the opencode CLI driver (stalls on this build; see notes)
 scripts/                    ~40 one-off probes and controls from the investigation

@@ -1,0 +1,15 @@
+{
+ "arm": "C1.plain_benign",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 41,
+ "meta": {
+  "stop": "tool_use",
+  "out": 733,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}

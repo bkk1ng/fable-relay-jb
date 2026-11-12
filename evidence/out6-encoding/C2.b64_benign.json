@@ -1,0 +1,15 @@
+{
+ "arm": "C2.b64_benign",
+ "code": 200,
+ "verdict": "PASS_TOOL",
+ "lines": 42,
+ "meta": {
+  "stop": "tool_use",
+  "out": 785,
+  "blocks": [
+   "thinking",
+   "tool_use"
+  ]
+ },
+ "text": ""
+}
