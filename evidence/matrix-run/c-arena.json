@@ -1,0 +1,21 @@
+{
+ "id": "c-arena",
+ "lang": "c",
+ "domain": "memory",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. arena.h and arena.c: bump allocator over a malloc'd block. arena_new(size), arena_alloc(size, align), arena_mark/arena_reset, arena_free. alignment up to 64 bytes, returns NULL on overflow. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 448,
+ "files": {
+  "arena.h": "/*\n * arena.h \u2014 bump allocator over a malloc'd block (C11)\n *\n * Usage:\n *   Arena *a = arena_new(1024 * 1024);\n *   void *p   = arena_alloc(a, 256, 16);\n *   ArenaPos mark = arena_mark(a);\n *   ...\n *   arena_reset(a, mark);\n *   arena_free(a);\n */\n\n#ifndef ARENA_H\n#define ARENA_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n/* Maximum supported alignment (must be a power of two, <= 64). */\n#define ARENA_MAX_ALIGN 64\n\ntypedef struct Arena Arena;\n\n/* Opaque position for mark/reset.  Store by value. */\ntypedef struct {\n    size_t offset;\n} ArenaPos;\n\n/*\n * arena_new \u2014 allocate an arena backed by a malloc'd block of `size` bytes.\n * Returns NULL if malloc fails or size == 0.\n */\nArena *arena_new(size_t size);\n\n/*\n * arena_alloc \u2014 bump-allocate `size` bytes aligned to `align`.\n * `align` must be a power of two in [1, ARENA_MAX_ALIGN].\n * Returns NULL on overflow or if `align` is invalid.\n */\nvoid *arena_alloc(Arena *a, size_t size, size_t align);\n\n/*\n * arena_mark \u2014 capture the current allocation offset so it can be\n * restored later.\n */\nArenaPos arena_mark(const Arena *a);\n\n/*\n * arena_reset \u2014 restore the arena to a previously captured position,\n * effectively freeing everything allocated after the mark.\n * Passing a position from a different arena is undefined behaviour.\n */\nvoid arena_reset(Arena *a, ArenaPos pos);\n\n/*\n * arena_free \u2014 release the backing block and the arena header.\n * The pointer is invalid after this call.\n */\nvoid arena_free(Arena *a);\n\n#endif /* ARENA_H */\n"
+ },
+ "prose": "",
+ "secs": 8.9
+}

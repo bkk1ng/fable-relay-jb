@@ -1,0 +1,21 @@
+{
+ "id": "glsl-compute",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 378,
+ "files": {
+  "reduce.comp": "#version 450\n\n// Parallel reduction: sum of a float array\n// local_size_x = 256, tree reduction with barriers\n// Partial sums written to output buffer per workgroup\n// Handles non-multiple-of-256 sizes via zero padding\n\nlayout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n\nlayout(std430, binding = 0) readonly buffer InputBuffer {\n    float data[];\n};\n\nlayout(std430, binding = 1) writeonly buffer OutputBuffer {\n    float partialSums[];\n};\n\nlayout(push_constant) uniform PushConstants {\n    uint elementCount;\n} pc;\n\nshared float sdata[256];\n\nvoid main() {\n    uint tid        = gl_LocalInvocationID.x;\n    uint globalIdx  = gl_GlobalInvocationID.x;\n    uint groupIdx   = gl_WorkGroupID.x;\n\n    // Load element; pad with 0.0 if out of range\n    sdata[tid] = (globalIdx < pc.elementCount) ? data[globalIdx] : 0.0;\n\n    barrier();\n    memoryBarrierShared();\n\n    // Tree reduction within the workgroup\n    for (uint stride = 128u; stride > 0u; stride >>= 1u) {\n        if (tid < stride) {\n            sdata[tid] += sdata[tid + stride];\n        }\n        barrier();\n        memoryBarrierShared();\n    }\n\n    // Thread 0 writes this workgroup's partial sum\n    if (tid == 0u) {\n        partialSums[groupIdx] = sdata[0];\n    }\n}\n"
+ },
+ "prose": "",
+ "secs": 8.7
+}

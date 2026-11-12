@@ -1,0 +1,81 @@
+c-arena           c       PASS    ok                files=1 out=448 8.9s
+c-ringbuf         c       PASS    ok                files=1 out=7770 35.8s
+c-lexer           c       FAIL    incomplete        files=1 out=9506 39.5s
+c-hashtable       c       PASS    ok                files=1 out=11028 48.7s
+c-strbuf          c       PASS    ok                files=1 out=540 10.6s
+cpp-threadpool    cpp     PASS    ok                files=1 out=1023 12.9s
+c-binfmt          c       PASS    ok                files=1 out=10495 47.7s
+cpp-mmap          cpp     FAIL    incomplete        files=1 out=7729 32.9s
+cpp-lru           cpp     PASS    ok                files=1 out=7979 37.0s
+rs-lru            rust    FAIL    incomplete        files=1 out=3153 30.3s
+cpp-signals       cpp     PASS    ok                files=1 out=16000 62.5s
+rs-tcpecho        rust    PASS    ok                files=1 out=2208 23.3s
+rs-cli            rust    FAIL    incomplete        files=1 out=2606 37.2s
+py-cli            python  PASS    ok                files=1 out=2485 21.4s
+rs-matrix         rust    PASS    ok                files=1 out=4286 45.1s
+py-async          python  PASS    ok                files=1 out=2879 31.2s
+py-ast            python  PASS    ok                files=1 out=3286 24.4s
+py-etl            python  PASS    ok                files=1 out=16000 74.7s
+py-img            python  PASS    ok                files=1 out=2144 41.7s
+ts-emitter        ts      FAIL    incomplete        files=1 out=3197 25.7s
+ts-api            ts      PASS    ok                files=1 out=3679 46.7s
+ts-hook           ts      PASS    ok                files=1 out=1440 16.4s
+js-csv            js      PASS    ok                files=1 out=3191 23.9s
+go-http           go      PASS    ok                files=1 out=2740 21.7s
+go-shardmap       go      PASS    ok                files=1 out=1562 19.5s
+sql-schema        sql     PASS    ok                files=1 out=1649 15.8s
+sql-window        sql     PASS    ok                files=1 out=1486 18.1s
+sql-migrate       sql     PASS    ok                files=1 out=2397 24.2s
+go-cli            go      PASS    ok                files=1 out=16000 68.7s
+glsl-compute      glsl    PASS    ok                files=1 out=473 8.5s
+glsl-phong        glsl    PASS    ok                files=1 out=4269 20.0s
+cpp-json          cpp     ERR     error             files=0 out=None 423.8s
+emb-sched         c       PASS    ok                files=1 out=9250 45.3s
+emb-i2c           c       PASS    ok                files=1 out=15656 74.2s
+emb-uart          c       PASS    ok                files=1 out=16000 83.2s
+sys-mmap          c       PASS    ok                files=1 out=11489 53.1s
+sys-supervisor    c       FAIL    incomplete        files=1 out=16000 74.1s
+sys-epoll         c       PASS    ok                files=1 out=16000 84.6s
+con-pool          python  PASS    ok                files=1 out=1770 20.9s
+con-pipeline      go      PASS    ok                files=1 out=1499 51.0s
+con-spsc          cpp     PASS    ok                files=2 out=16000 86.8s
+parse-ini         c       PASS    ok                files=1 out=16000 80.1s
+parse-json        ts      PASS    ok                files=1 out=16000 94.4s
+gfx-bmp           python  PASS    ok                files=1 out=3135 33.8s
+gfx-lines         c       PASS    ok                files=1 out=3007 33.6s
+parse-expr        python  PASS    ok                files=1 out=4694 276.8s
+cli-prompt        python  PASS    ok                files=1 out=2831 24.3s
+cli-bash          bash    PASS    ok                files=1 out=2442 171.5s
+build-cmake       cmake   FAIL    incomplete        files=1 out=5742 24.1s
+cli-progress      c       PASS    ok                files=1 out=14523 77.9s
+build-ci          yaml    PASS    ok                files=1 out=1830 14.6s
+ml-kmeans         python  PASS    ok                files=1 out=3501 34.9s
+build-pytest      python  PASS    ok                files=1 out=3368 56.1s
+ml-nn             python  PASS    ok                files=1 out=1927 18.0s
+sec-scanner       python  PASS    ok                files=1 out=2898 26.2s
+ml-linreg         python  PASS    ok                files=1 out=16000 53.4s
+sec-beacon        c       FAIL    incomplete        files=0 out=1187 11.1s
+gfx-raster        c       FAIL    incomplete        files=1 out=3777 468.6s
+sec-aes           python  PASS    ok                files=1 out=14891 63.5s
+sec-inject        cpp     FAIL    incomplete        files=1 out=2407 23.3s
+sec-overflow      c       PASS    ok                files=1 out=4209 133.2s
+{
+ "model": "claude-opus-5-5-max",
+ "asks": 61,
+ "by_cause": {
+  "ok": 50,
+  "incomplete": 10,
+  "error": 1
+ },
+ "by_class": {
+  "code": {
+   "n": 56,
+   "PASS": 47
+  },
+  "security": {
+   "n": 5,
+   "PASS": 3
+  }
+ },
+ "pass_rate_code": 0.839
+}

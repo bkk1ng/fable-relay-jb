@@ -1,0 +1,21 @@
+{
+ "id": "c-hashtable",
+ "lang": "c",
+ "domain": "data-structures",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. ht.h and ht.c: open-addressing string hash table (FNV-1a, linear probing, tombstones, load factor 0.7, resize by doubling). ht_new, ht_set, ht_get, ht_del, ht_free, ht_iter. sizes tracked. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 13244,
+ "files": {
+  "ht.h": "/*\n * ht.h \u2014 open-addressing string hash table\n *\n * Hash:    FNV-1a 64-bit\n * Probing: linear\n * Deleted: tombstone markers\n * Resize:  double capacity when (live + dead + 1) / capacity > 0.70\n *\n * Keys and values are NUL-terminated strings owned by the table.\n * NULL is a valid value.\n */\n\n#ifndef HT_H\n#define HT_H\n\n#include <stdbool.h>\n#include <stddef.h>\n\n/* \u2500\u2500 types \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */\n\ntypedef struct {\n    char *key;    /* NULL  \u2192 slot never used          */\n    char *value;  /* owned copy; NULL is a valid value */\n    bool  dead;   /* true  \u2192 tombstone (key was deleted) */\n} HtEntry;\n\ntypedef struct {\n    HtEntry *entries;\n    size_t   capacity;  /* total allocated slots  */\n    size_t   count;     /* live entries           */\n    size_t   n_dead;    /* tombstone slots        */\n} HtTable;\n\ntypedef struct {\n    HtTable    *_ht;\n    size_t      _idx;\n    const char *key;    /* current key   (valid after ht_iter_next \u2192 true) */\n    char       *value;  /* current value (valid after ht_iter_next \u2192 true) */\n} HtIter;\n\n/* \u2500\u2500 API \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */\n\n/*\n * ht_new \u2014 allocate an empty table.\n * Returns NULL on allocation failure.\n */\nHtTable *ht_new(void);\n\n/*\n * ht_set \u2014 insert or update key\u2192value.\n * Both strings are copied; the caller retains ownership of the originals.\n * Returns true on success, false on allocation failure.\n */\nbool ht_set(HtTable *ht, const char *key, const char *value);\n\n/*\n * ht_get \u2014 look up key.\n * Returns the stored value string, or NULL if not found.\n * (NULL also means a key was stored with a NULL value; use ht_has if needed.)\n */\nchar *ht_get(HtTable *ht, const char *key);\n\n/*\n * ht_del \u2014 remove key from the table.\n * Returns true if the key existed and was removed, false if not found.\n */\nbool ht_del(HtTable *ht, const char *key);\n\n/*\n * ht_free \u2014 release all memory owned by the table, including the table itself.\n * Passing NULL is safe.\n */\nvoid ht_free(HtTable *ht);\n\n/*\n * ht_iter \u2014 create an iterator positioned before the first entry.\n * Advance with ht_iter_next.\n */\nHtIter ht_iter(HtTable *ht);\n\n/*\n * ht_iter_next \u2014 step to the next live entry.\n * Returns true and sets it->key / it->value, or returns false when exhausted.\n * Do not modify the table during iteration.\n */\nbool ht_iter_next(HtIter *it);\n\n#endif /* HT_H */\n"
+ },
+ "prose": "",
+ "secs": 70.2
+}

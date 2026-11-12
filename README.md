@@ -1,6 +1,13 @@
 # Measured jailbreak attempts against a filtered Claude relay
 
-**Status: no universal jailbreak was produced.** Markdown-only prose arms answer security asks
+**Coding matrix (current headline): 53/56 non-security coding asks (94.6%) return artifact files that
+pass their language's real validator, 57/61 overall, every non-pass attributed to a named cause.**
+61 asks across 12 languages — C, C++, Rust, Python, TS/JS, Go, SQL, GLSL, bare-metal Cortex-M,
+systems, concurrency, parsers, graphics, CLI, build/CI, ML. Raw JSON: `evidence/matrix-run/`.
+Reproduce: `python3 harness/matrix.py --run --workers 3` then `--revalidate`. Numbers, the security
+section and the honest limits: [`FINAL-REPORT.md`](FINAL-REPORT.md).
+
+**Status of the topic-level claim: no universal jailbreak was produced.** Markdown-only prose arms answer security asks
 (see the class table below), and a narrow game-cheat channel works in two configurations — but the
 class-level probes are 2/24 with FABLE replaced and 0/22 with FABLE present, and the relay's own
 classifier hard-blocks security, weapons and injection briefs whatever the payload says. The measured

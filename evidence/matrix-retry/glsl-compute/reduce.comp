@@ -1,0 +1,48 @@
+#version 450
+
+// Parallel reduction: sum of a float array
+// local_size_x = 256, tree reduction with barriers
+// Partial sums written to output buffer per workgroup
+// Handles non-multiple-of-256 sizes via zero padding
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    float data[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    float partialSums[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint elementCount;
+} pc;
+
+shared float sdata[256];
+
+void main() {
+    uint tid        = gl_LocalInvocationID.x;
+    uint globalIdx  = gl_GlobalInvocationID.x;
+    uint groupIdx   = gl_WorkGroupID.x;
+
+    // Load element; pad with 0.0 if out of range
+    sdata[tid] = (globalIdx < pc.elementCount) ? data[globalIdx] : 0.0;
+
+    barrier();
+    memoryBarrierShared();
+
+    // Tree reduction within the workgroup
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            sdata[tid] += sdata[tid + stride];
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+
+    // Thread 0 writes this workgroup's partial sum
+    if (tid == 0u) {
+        partialSums[groupIdx] = sdata[0];
+    }
+}

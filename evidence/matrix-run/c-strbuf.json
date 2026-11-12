@@ -1,0 +1,21 @@
+{
+ "id": "c-strbuf",
+ "lang": "c",
+ "domain": "data-structures",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. strbuf.h and strbuf.c: growable string builder. sb_init, sb_free, sb_append, sb_appends, sb_appendf (variadic, uses vsnprintf twice for sizing), sb_clear, sb_cstr. doubling growth, no leaks, returns 0/-1. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 540,
+ "files": {
+  "strbuf.h": "/*\n * strbuf.h \u2014 growable string builder (C11)\n *\n * Usage:\n *   strbuf sb;\n *   sb_init(&sb);\n *   sb_appends(&sb, \"hello, \");\n *   sb_appendf(&sb, \"%s!\\n\", \"world\");\n *   printf(\"%s\", sb_cstr(&sb));\n *   sb_free(&sb);\n */\n\n#ifndef STRBUF_H\n#define STRBUF_H\n\n#include <stddef.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\ntypedef struct {\n    char   *data;   /* null-terminated buffer              */\n    size_t  len;    /* number of bytes written (not incl. NUL) */\n    size_t  cap;    /* allocated capacity (always > len)   */\n} strbuf;\n\n/*\n * sb_init  \u2014 initialise a zero-length buffer.\n *            Returns 0 on success, -1 on allocation failure.\n */\nint  sb_init(strbuf *sb);\n\n/*\n * sb_free  \u2014 release memory and reset the struct.\n *            Safe to call on an already-freed buffer.\n */\nvoid sb_free(strbuf *sb);\n\n/*\n * sb_clear \u2014 reset length to zero without freeing memory.\n *            The existing capacity is preserved.\n */\nvoid sb_clear(strbuf *sb);\n\n/*\n * sb_append  \u2014 append 'len' bytes from 'data' (may contain NUL bytes).\n *              Returns 0 on success, -1 on allocation failure.\n */\nint  sb_append(strbuf *sb, const char *data, size_t len);\n\n/*\n * sb_appends \u2014 append a NUL-terminated string.\n *              Returns 0 on success, -1 on allocation failure.\n */\nint  sb_appends(strbuf *sb, const char *str);\n\n/*\n * sb_appendf \u2014 printf-style append.\n *              Returns 0 on success, -1 on allocation failure or encode error.\n */\nint  sb_appendf(strbuf *sb, const char *fmt, ...)\n    __attribute__((format(printf, 2, 3)));\n\n/*\n * sb_cstr \u2014 return the current null-terminated contents.\n *           The pointer is valid until the next mutation.\n *           Never returns NULL (returns \"\" for an empty buffer).\n */\nconst char *sb_cstr(const strbuf *sb);\n\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* STRBUF_H */\n"
+ },
+ "prose": "",
+ "secs": 10.6
+}

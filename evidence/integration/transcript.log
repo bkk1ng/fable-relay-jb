@@ -1,0 +1,10 @@
+[0m
+> build · claude-opus-5-5-max
+[0m← [0mWrite ringbuf.c
+Created new file.
+
+Undo is unavailable for this change because the backup snapshot was skipped (temp_path).
+
+[AFT E? W? | ~D? U0 C0 | T0]
+> build · claude-opus-5-5-max
+ringbuf.c is written — 1024-byte ring buffer with `ringbuf_init`, `ringbuf_push`, `ringbuf_pop`, and `ringbuf_len`. It tracks a separate `len` field so the full/empty distinction is clean without wasting a slot, and head/tail wrap with modulo. Forty-six lines, no comments, C11.

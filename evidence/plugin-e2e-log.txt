@@ -1,0 +1,8 @@
+{"t":"2026-11-12T23:30:23.075Z","tag":"prompt.rung","rung":0,"chars":91}
+{"t":"2026-11-12T23:30:23.176Z","tag":"context","dropped":4,"toolsBefore":29,"toolsAfter":1,"sid":"ses_e2de74359ffelvDhQ5TgkI1CyH"}
+{"t":"2026-11-12T23:30:23.180Z","tag":"model","sid":"ses_e2de74359ffelvDhQ5TgkI1CyH","m":"{\"id\":\"gpt-6-luna\",\"providerID\":\"7api\",\"variant\":\"none\"}"}
+{"t":"2026-11-12T23:30:23.185Z","tag":"model","sid":"ses_e2de74359ffelvDhQ5TgkI1CyH","m":"{\"id\":\"claude-opus-5-5-max\",\"providerID\":\"7api-claude\",\"variant\":\"default\"}"}
+{"t":"2026-11-12T23:30:27.180Z","tag":"context","dropped":1,"toolsBefore":0,"toolsAfter":0,"sid":"ses_e2de74359ffelvDhQ5TgkI1CyH"}
+{"t":"2026-11-12T23:30:27.182Z","tag":"model","sid":"ses_e2de74359ffelvDhQ5TgkI1CyH","m":"{\"id\":\"claude-opus-5-5-max\",\"providerID\":\"7api-claude\",\"variant\":\"default\"}"}
+{"t":"2026-11-12T23:33:05.037Z","tag":"context","dropped":1,"toolsBefore":0,"toolsAfter":0,"sid":"ses_e2de504afffepQZI66L5AN2W5h"}
+{"t":"2026-11-12T23:33:05.038Z","tag":"model","sid":"ses_e2de504afffepQZI66L5AN2W5h","m":"{\"id\":\"claude-opus-5-5-max\",\"providerID\":\"7api-claude\",\"variant\":\"default\"}"}

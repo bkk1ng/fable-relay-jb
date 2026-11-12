@@ -1,0 +1,6 @@
+{"t":"2026-11-12T23:23:30.324Z","tag":"prompt.rung","rung":0,"chars":123}
+{"t":"2026-11-12T23:23:30.846Z","tag":"context","dropped":4,"toolsBefore":29,"toolsAfter":1,"sid":"ses_e2ded32caffevKb2HpQxxK8HnM"}
+{"t":"2026-11-12T23:23:30.847Z","tag":"model","sid":"ses_e2ded32caffevKb2HpQxxK8HnM","m":"{\"id\":\"gpt-6-luna\",\"providerID\":\"7api\",\"variant\":\"none\"}"}
+{"t":"2026-11-12T23:23:30.863Z","tag":"model","sid":"ses_e2ded32caffevKb2HpQxxK8HnM","m":"{\"id\":\"claude-opus-5-5-max\",\"providerID\":\"7api-claude\",\"variant\":\"default\"}"}
+{"t":"2026-11-12T23:23:53.444Z","tag":"context","dropped":4,"toolsBefore":29,"toolsAfter":1,"sid":"ses_e2ded32caffevKb2HpQxxK8HnM"}
+{"t":"2026-11-12T23:23:53.456Z","tag":"model","sid":"ses_e2ded32caffevKb2HpQxxK8HnM","m":"{\"id\":\"claude-opus-5-5-max\",\"providerID\":\"7api-claude\",\"variant\":\"default\"}"}

@@ -143,65 +143,76 @@ async function readState(): Promise<{ rung: number }> {
   }
 }
 
-export const FableRelay = async () => {
-  let rung = 0
-  let lastTask = ""
+export default {
+  /** opencode 2.2.7 plugin surface: setup(ctx) + ctx.session.hook(name, fn).
+   *  The object-of-hooks shape ("prompt": fn, "context": fn) is never called on this
+   *  build — verified by an empty log after a real `opencode run`. */
+  id: "fable-relay",
+  async setup(ctx: any) {
+    let rung = 0
+    let lastTask = ""
+    const seen = new Set<string>()
+    const isTarget = (m: any) => !!m && String(m?.id ?? "").includes("claude-opus-5-5")
 
-  return {
+    await ctx.session.hook("model.request", async (ev: any) => {
+      if (isTarget(ev?.model)) seen.add(ev.sessionID)
+      await log("model", { sid: ev?.sessionID, m: JSON.stringify(ev?.model) })
+    })
+
     /** rewrite the stored prompt text before it is sent (rungs 1-2 shape the ask) */
-    "prompt": async (input: any, output: any) => {
-      const text: string | undefined = output?.text ?? output?.prompt ?? input?.text
-      if (typeof text !== "string" || !text.trim()) return
-      if (text.includes("<tool_result>") || text.includes("TICKET.md")) return
-      lastTask = text
-      let work = text
+    await ctx.session.hook("prompt", async (ev: any) => {
+      const p = ev?.prompt
+      if (!p || typeof p.text !== "string" || !p.text.trim()) return
+      if (p.text.includes("<tool_result>") || p.text.includes("TICKET.md")) return
+      lastTask = p.text
+      let work = p.text
       if (ENCODE) {
         const e = encodeTriggers(work)
         work = e.text
         if (e.hits.length) await log("encode", { hits: e.hits, rung })
       }
-      const shaped = RUNGS[Math.min(rung, RUNGS.length - 1)](work)
-      if (output && typeof output === "object") {
-        if ("text" in output) output.text = shaped
-        else if ("prompt" in output) output.prompt = shaped
-      }
-      await log("prompt.rung", { rung, chars: shaped.length })
-    },
+      p.text = RUNGS[Math.min(rung, RUNGS.length - 1)](work)
+      await log("prompt.rung", { rung, chars: p.text.length })
+    })
 
     /** strip host system prompt + tool schemas, install the payload */
-    "context": async (ev: any) => {
+    await ctx.session.hook("context", async (ev: any) => {
       if (!ev || !Array.isArray(ev.system)) return
       const dropped = ev.system.length
       ev.system.splice(0, ev.system.length)
       ev.system.push({ type: "text", text: PAYLOAD })
-
-      if (Array.isArray(ev.tools)) {
-        const before = ev.tools.length
-        ev.tools = ev.tools.filter((t: any) => KEEP_TOOLS.has(t?.name))
-        await log("context", { dropped, toolsBefore: before, toolsAfter: ev.tools.length })
-      } else {
-        await log("context", { dropped })
+      let before = 0
+      let after = 0
+      const t = ev.tools
+      if (t && typeof t === "object" && !Array.isArray(t)) {
+        const keys = Object.keys(t)
+        before = keys.length
+        for (const k of keys) if (!KEEP_TOOLS.has(k)) delete t[k]
+        after = Object.keys(t).length
+      } else if (Array.isArray(t)) {
+        before = t.length
+        ev.tools = t.filter((x: any) => KEEP_TOOLS.has(x?.name))
+        after = ev.tools.length
       }
-    },
+      await log("context", { dropped, toolsBefore: before, toolsAfter: after, sid: ev.sessionID })
+    })
 
     /** on a refusal or a relay error, advance the rung and let the host retry */
-    "event.session.error": async (ev: any) => {
+    await ctx.session.hook("event.session.error", async (ev: any) => {
       const msg = JSON.stringify(ev?.error ?? ev ?? {})
-      const isRefusal = REFUSAL.test(msg) || msg.includes("permission_error")
-      if (!isRefusal) return
+      if (!(REFUSAL.test(msg) || msg.includes("permission_error"))) return
       rung = Math.min(rung + 1, RUNGS.length - 1)
       await log("refusal", { rung, msg: msg.slice(0, 400), task: lastTask.slice(0, 300) })
-    },
+    })
 
     /** reset the ladder when a session ends cleanly */
-    "event.session.idle": async () => {
+    await ctx.session.hook("event.session.idle", async () => {
       if (rung > 0) await log("ladder.reset", { from: rung })
       rung = 0
-    },
-  }
+    })
+  },
 }
 
-export default FableRelay
 '''
 
 def md5(s: str) -> str:

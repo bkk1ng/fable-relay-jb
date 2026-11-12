@@ -1,0 +1,15 @@
+{
+ "model": "claude-opus-5-5-max",
+ "asks": 4,
+ "by_cause": {
+  "incomplete": 1,
+  "error": 3
+ },
+ "by_class": {
+  "code": {
+   "n": 4,
+   "PASS": 0
+  }
+ },
+ "pass_rate_code": 0.0
+}

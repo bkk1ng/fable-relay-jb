@@ -1,0 +1,17 @@
+{
+ "id": "py-cli",
+ "lang": "python",
+ "domain": "cli",
+ "cls": "code",
+ "v": "python",
+ "ask": "Python 3.12, stdlib only. csv2db.py: argparse CLI that streams a CSV into SQLite with column type inference (int/float/text/date), --table, --db, --null markers, batch inserts in transactions, a --dry-run schema print, and a progress line on stderr. write the file.",
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "error",
+ "detail": "error code: 502\n",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "error code: 502\n",
+ "secs": 423.8
+}

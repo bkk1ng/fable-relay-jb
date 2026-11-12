@@ -1,0 +1,17 @@
+{
+ "id": "sys-epoll",
+ "lang": "c",
+ "domain": "systems",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11, Linux, epoll, single-threaded event loop. server.c: non-blocking TCP server, epoll edge-triggered, per-connection growable buffer, line-delimited protocol, partial write handling with an output queue, accept loop draining EAGAIN, idle timeout sweep, SIGINT shutdown. main takes a port. write the file.",
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "error",
+ "detail": "error code: 502\n",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "error code: 502\n",
+ "secs": 424.0
+}

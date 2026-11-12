@@ -1,0 +1,17 @@
+{
+ "id": "cli-bash",
+ "lang": "bash",
+ "domain": "cli",
+ "cls": "code",
+ "v": "sh",
+ "ask": "bash 5, POSIX-safe where practical. backup.sh: backup utility with subcommands (create/restore/list/prune), set -euo pipefail, getopts-style parsing for --dest/--src/--keep/--dry-run/--verbose, timestamped tar.gz archives, retention pruning by count, a lockfile to prevent concurrent runs, and trap-based cleanup. write the file.",
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "error",
+ "detail": "error code: 502\n",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "error code: 502\n",
+ "secs": 423.6
+}

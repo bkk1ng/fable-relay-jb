@@ -1,0 +1,22 @@
+| id | lang | domain | class | verdict | cause | files | secs |
+|---|---|---|---|---|---|---|---|
+| c-hashtable | c | data-structures | code | PASS | ok | 1 | 70.2 |
+| c-ringbuf | c | data-structures | code | PASS | ok | 2 | 46.8 |
+| emb-i2c | c | embedded | code | PASS | ok | 1 | 71.0 |
+| emb-sched | c | embedded | code | PASS | ok | 2 | 53.1 |
+| emb-uart | c | embedded | code | PASS | ok | 1 | 48.8 |
+| sys-epoll | c | systems | code | PASS | ok | 1 | 138.1 |
+| sys-mmap | c | systems | code | PASS | ok | 1 | 72.2 |
+| sys-supervisor | c | systems | code | FAIL | incomplete | 1 | 86.5 |
+| glsl-compute | glsl | graphics | code | PASS | ok | 1 | 8.7 |
+| glsl-phong | glsl | graphics | code | PASS | ok | 1 | 6.6 |
+| rs-cli | rust | cli | code | PASS | ok | 1 | 23.0 |
+| rs-lru | rust | data-structures | code | PASS | ok | 1 | 30.5 |
+| rs-matrix | rust | math | code | PASS | ok | 1 | 39.1 |
+| rs-tcpecho | rust | networking | code | FAIL | incomplete | 1 | 25.6 |
+| sql-migrate | sql | database | code | PASS | ok | 1 | 17.8 |
+| sql-schema | sql | database | code | PASS | ok | 1 | 15.6 |
+| sql-window | sql | database | code | PASS | ok | 1 | 17.8 |
+| sec-beacon | c | security | security | REFUSE | refusal | 0 | 11.5 |
+| sec-aes | python | security | security | PASS | ok | 1 | 28.0 |
+| sec-scanner | python | security | security | PASS | ok | 1 | 32.7 |

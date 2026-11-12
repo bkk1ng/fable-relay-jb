@@ -1,0 +1,753 @@
+[
+{
+"id": "c-ringbuf",
+"lang": "c",
+"domain": "data-structures",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"ringbuf.h",
+"ringbuf.c"
+],
+"ask": "C11, no dynamic allocation. ringbuf.h and ringbuf.c: fixed 4096-byte single-producer/single-consumer ring buffer. functions rb_init, rb_push, rb_pop, rb_peek, rb_len, rb_space, all taking a struct pointer, all return int status. write the files."
+},
+{
+"id": "c-hashtable",
+"lang": "c",
+"domain": "data-structures",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"ht.h",
+"ht.c"
+],
+"ask": "C11. ht.h and ht.c: open-addressing string hash table (FNV-1a, linear probing, tombstones, load factor 0.7, resize by doubling). ht_new, ht_set, ht_get, ht_del, ht_free, ht_iter. sizes tracked. write the files."
+},
+{
+"id": "c-arena",
+"lang": "c",
+"domain": "memory",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"arena.h",
+"arena.c"
+],
+"ask": "C11. arena.h and arena.c: bump allocator over a malloc'd block. arena_new(size), arena_alloc(size, align), arena_mark/arena_reset, arena_free. alignment up to 64 bytes, returns NULL on overflow. write the files."
+},
+{
+"id": "c-lexer",
+"lang": "c",
+"domain": "parsers",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"lex.h",
+"lex.c"
+],
+"ask": "C11. lex.h and lex.c: tokenizer for a small config language (identifiers, numbers incl floats, string literals with escapes, punctuation, // and /* */ comments, newlines). lex_next returns a token struct with type, start pointer, length, line number. write the files."
+},
+{
+"id": "c-binfmt",
+"lang": "c",
+"domain": "systems",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"binfmt.c"
+],
+"ask": "C11, single file. binfmt.c: parse a little-endian binary container header (magic 0x4C425931, version u16, flags u16, record count u32, record size u32, then records of id u32 + offset u32 + length u32), validate magic/version/bounds against the file size, print a table of records, and return non-zero on corruption. read helpers must be endian-safe. main opens the path from argv[1]. write the file."
+},
+{
+"id": "c-strbuf",
+"lang": "c",
+"domain": "data-structures",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"strbuf.h",
+"strbuf.c"
+],
+"ask": "C11. strbuf.h and strbuf.c: growable string builder. sb_init, sb_free, sb_append, sb_appends, sb_appendf (variadic, uses vsnprintf twice for sizing), sb_clear, sb_cstr. doubling growth, no leaks, returns 0/-1. write the files."
+},
+{
+"id": "cpp-threadpool",
+"lang": "cpp",
+"domain": "concurrency",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"threadpool.hpp",
+"main.cpp"
+],
+"ask": "C++17, standard library only. threadpool.hpp and main.cpp: thread pool with enqueue returning std::future, condition_variable workers, graceful shutdown draining queued work, max queue size with backpressure. main submits 1000 tasks and prints the sum. write the files."
+},
+{
+"id": "cpp-json",
+"lang": "cpp",
+"domain": "parsers",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"json.hpp",
+"main.cpp"
+],
+"ask": "C++17, no external libraries. json.hpp and main.cpp: recursive-descent JSON parser producing a Value variant (null/bool/double/string/array/object), string escape handling, error with offset, plus a serializer with optional pretty printing. main parses a sample document and round-trips it. write the files."
+},
+{
+"id": "cpp-mmap",
+"lang": "cpp",
+"domain": "systems",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"mapped_file.hpp",
+"main.cpp"
+],
+"ask": "C++17, POSIX (linux). mapped_file.hpp and main.cpp: RAII memory-mapped file reader using open/fstat/mmap, movable, non-copyable, handles empty files, exposes span of bytes and a template view<T> with alignment check. main prints the size and first bytes of the file given in argv[1]. write the files."
+},
+{
+"id": "cpp-lru",
+"lang": "cpp",
+"domain": "data-structures",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"lru.hpp",
+"test.cpp"
+],
+"ask": "C++17, header-only. lru.hpp and test.cpp: LRU cache template LRU<K,V> with capacity, get/put/erase/size, std::list + std::unordered_map, move semantics. test.cpp exercises eviction order, updates, and a 10000-entry stress loop with a small assert harness. write the files."
+},
+{
+"id": "cpp-signals",
+"lang": "cpp",
+"domain": "design",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"signals.hpp",
+"test.cpp"
+],
+"ask": "C++17, header-only, thread-safe. signals.hpp and test.cpp: signal/slot library Signal<Args...> with connect returning a Connection, disconnect, RAII scoped connection, mutex-protected slot list with a copy-on-emit strategy, emitting from multiple threads. test.cpp proves connect/disconnect and concurrent emit. write the files."
+},
+{
+"id": "rs-lru",
+"lang": "rust",
+"domain": "data-structures",
+"cls": "code",
+"v": "rust",
+"tok": 16000,
+"files": [
+"src/lru.rs"
+],
+"ask": "Rust 2021, std only, no crates. src/lru.rs: generic LRU<K: Eq + Hash + Clone, V> with capacity, get (freshness update), put, peek, remove, len, clear. Doubly-linked via a VecDeque of keys plus a HashMap. include #[cfg(test)] unit tests covering eviction order, overwrite, and zero-capacity. write the file."
+},
+{
+"id": "rs-tcpecho",
+"lang": "rust",
+"domain": "networking",
+"cls": "code",
+"v": "rust",
+"tok": 16000,
+"files": [
+"src/main.rs"
+],
+"ask": "Rust 2021, std only. src/main.rs: threaded TCP echo server on 127.0.0.1:7878 with a connection handler per thread, read timeout, line-or-bytes echo, a max-connections counter via Arc+AtomicUsize, and graceful shutdown on SIGINT using a static AtomicBool with a self-pipe or polling accept timeout. print connection lifecycle. write the file."
+},
+{
+"id": "rs-cli",
+"lang": "rust",
+"domain": "cli",
+"cls": "code",
+"v": "rust",
+"tok": 16000,
+"files": [
+"src/main.rs"
+],
+"ask": "Rust 2021, std only, no clap. src/main.rs: argument parser for a subcommand CLI (build/run/clean) supporting long and short flags, --key=value and --key value, positional args, --help and --version text, and unknown-flag errors to stderr with exit code 2. parse into a typed struct and print the resolved config. write the file."
+},
+{
+"id": "rs-matrix",
+"lang": "rust",
+"domain": "math",
+"cls": "code",
+"v": "rust",
+"tok": 16000,
+"files": [
+"src/matrix.rs"
+],
+"ask": "Rust 2021, std only. src/matrix.rs: fixed-size generic matrix type Mat<const R: usize, const C: usize> over f64 with add, sub, mul (dimension-checked via const generics where possible, else runtime assert), transpose, identity, LU decomposition with partial pivoting returning determinant and solver. #[cfg(test)] tests including a non-invertible matrix. write the file."
+},
+{
+"id": "py-cli",
+"lang": "python",
+"domain": "cli",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"csv2db.py"
+],
+"ask": "Python 3.12, stdlib only. csv2db.py: argparse CLI that streams a CSV into SQLite with column type inference (int/float/text/date), --table, --db, --null markers, batch inserts in transactions, a --dry-run schema print, and a progress line on stderr. write the file."
+},
+{
+"id": "py-async",
+"lang": "python",
+"domain": "concurrency",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"pool.py"
+],
+"ask": "Python 3.12, stdlib only. pool.py: asyncio worker pool with a bounded queue, N workers, per-task timeout, exponential-backoff retries, task result collection, clean cancellation on shutdown, and a __main__ demo that processes 50 simulated jobs and prints timing plus failure counts. write the file."
+},
+{
+"id": "py-etl",
+"lang": "python",
+"domain": "data",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"dedupe.py"
+],
+"ask": "Python 3.12, stdlib only. dedupe.py: streaming ETL that reads JSON Lines, deduplicates by a composite key with a bounded-memory strategy (hash set of 8-byte blake2b digests plus an on-disk set spill at N items), counts dupes per key, writes clean output, and prints stats. write the file."
+},
+{
+"id": "py-ast",
+"lang": "python",
+"domain": "tooling",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"lint_report.py"
+],
+"ask": "Python 3.12, stdlib only (ast, pathlib, argparse). lint_report.py: static report for any python file \u2014 unused imports, functions longer than N lines, functions with more than M arguments, missing docstrings, bare excepts. prints a table sorted by severity, exits 1 if any finding with --strict. write the file."
+},
+{
+"id": "py-img",
+"lang": "python",
+"domain": "graphics",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"bitmap.py"
+],
+"ask": "Python 3.12, stdlib only, no PIL. bitmap.py: write a 24-bit BMP with a row-padded pixel buffer class, plus nearest-neighbour resize and a bilinear resize on a generated gradient, saving two files. include struct packing for the BITMAPFILEHEADER/BITMAPINFOHEADER. write the file."
+},
+{
+"id": "ts-api",
+"lang": "ts",
+"domain": "web",
+"cls": "code",
+"v": "ts",
+"tok": 16000,
+"files": [
+"server.ts"
+],
+"ask": "TypeScript, Node 22, no express. server.ts: typed mini framework \u2014 router with method+path patterns, param extraction, JSON body parsing with size limit, schema validation helpers, error middleware, 404 and 500 handling, in-memory store for a todo resource with CRUD routes, and graceful shutdown. compile clean under strict. write the file."
+},
+{
+"id": "ts-emitter",
+"lang": "ts",
+"domain": "design",
+"cls": "code",
+"v": "ts",
+"tok": 16000,
+"files": [
+"emitter.ts"
+],
+"ask": "TypeScript strict, no dependencies. emitter.ts: typed event emitter where the event map is a generic type parameter, methods on/once/off/emit/listenerCount, wildcard listener support, listener errors isolated so one throw does not stop others, and a small self-test under a __main__ block. write the file."
+},
+{
+"id": "js-csv",
+"lang": "js",
+"domain": "parsers",
+"cls": "code",
+"v": "js",
+"tok": 16000,
+"files": [
+"csv.js"
+],
+"ask": "Node 22 CommonJS, no dependencies. csv.js: streaming CSV parser handling quoted fields, escaped quotes, embedded newlines, CRLF, and a configurable delimiter, exposed as a Transform stream plus a parseAll convenience, with a small demo reading from a string and printing rows. write the file."
+},
+{
+"id": "ts-hook",
+"lang": "ts",
+"domain": "frontend",
+"cls": "code",
+"v": "ts",
+"tok": 16000,
+"files": [
+"useDebouncedQuery.ts"
+],
+"ask": "TypeScript, React 18 types available. useDebouncedQuery.ts: hook that debounces a query string, cancels in-flight requests with AbortController, exposes {data, loading, error, refetch}, handles race conditions with a request id, and cleans up on unmount. include a usage comment block. write the file."
+},
+{
+"id": "go-http",
+"lang": "go",
+"domain": "web",
+"cls": "code",
+"v": "go",
+"tok": 16000,
+"files": [
+"main.go"
+],
+"ask": "Go 1.22, standard library only. main.go: net/http JSON API with middleware chain (request id, structured logging with slog, panic recovery, simple token auth), two handlers with typed request/response structs, graceful shutdown on SIGTERM with context timeouts. write the file."
+},
+{
+"id": "go-shardmap",
+"lang": "go",
+"domain": "concurrency",
+"cls": "code",
+"v": "go",
+"tok": 16000,
+"files": [
+"shardmap.go"
+],
+"ask": "Go 1.22, standard library only. shardmap.go: generic sharded concurrent map ShardMap[K comparable, V any] with 32 shards, RWMutex per shard, Get/Set/Delete/Range/Len, fnv hashing of the key, and a benchmark plus a concurrent smoke test. write the file."
+},
+{
+"id": "go-cli",
+"lang": "go",
+"domain": "cli",
+"cls": "code",
+"v": "go",
+"tok": 16000,
+"files": [
+"main.go"
+],
+"ask": "Go 1.22, standard library only. main.go: CLI that walks a directory, computes sha256 per file with a bounded worker pool, skips symlinks and .git, writes a sorted manifest (path, size, hash) to stdout or --out, prints a summary to stderr, and supports --exclude glob and --jobs. write the file."
+},
+{
+"id": "sql-schema",
+"lang": "sql",
+"domain": "database",
+"cls": "code",
+"v": "sql",
+"tok": 16000,
+"files": [
+"schema.sql"
+],
+"ask": "SQLite. schema.sql: bookings system \u2014 users, resources, bookings with overlap prevention, CHECK constraints on time ranges, foreign keys with proper ON DELETE, indexes for the common lookups, and a trigger that maintains updated_at. write the file."
+},
+{
+"id": "sql-window",
+"lang": "sql",
+"domain": "database",
+"cls": "code",
+"v": "sql",
+"tok": 16000,
+"files": [
+"reports.sql"
+],
+"ask": "SQLite (window functions available). reports.sql: assume the schema from a bookings system with bookings(id, user_id, resource_id, starts_at, ends_at, cents). Write queries: monthly revenue with running total and month-over-month delta using window functions, per-resource utilisation ranking with RANK and NTILE, and a gap-detection query using LAG/LEAD. comment each query. write the file."
+},
+{
+"id": "sql-migrate",
+"lang": "sql",
+"domain": "database",
+"cls": "code",
+"v": "sql",
+"tok": 16000,
+"files": [
+"migrate.sql"
+],
+"ask": "SQLite. migrate.sql: a versioned migration script with a schema_migrations table, idempotent up-migrations (001..003: add table, add column with default backfill, create index), guarded with PRAGMA user_version, plus commented down-migrations. must run twice without error. write the file."
+},
+{
+"id": "glsl-phong",
+"lang": "glsl",
+"domain": "graphics",
+"cls": "code",
+"v": "glsl",
+"tok": 16000,
+"files": [
+"phong.vert",
+"phong.frag"
+],
+"ask": "GLSL 330 core. phong.vert and phong.frag: per-fragment Phong lighting with one directional light and one point light, normal matrix uniform, ambient/diffuse/specular terms, specular exponent and attenuation uniforms, gamma-correct output. write the two files."
+},
+{
+"id": "glsl-compute",
+"lang": "glsl",
+"domain": "graphics",
+"cls": "code",
+"v": "glsl",
+"tok": 16000,
+"files": [
+"reduce.comp"
+],
+"ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file."
+},
+{
+"id": "emb-uart",
+"lang": "c",
+"domain": "embedded",
+"cls": "code",
+"v": "arm",
+"tok": 16000,
+"files": [
+"uart.h",
+"uart.c"
+],
+"ask": "Bare-metal C for ARM Cortex-M4 (no HAL, no CMSIS), register-level. uart.h and uart.c: interrupt-driven UART driver with a transmit ring buffer, DMA-free ISR handlers, uart_init(baud) computing the divisor, uart_write (non-blocking, returns -1 when full), uart_read, and static register structs at fixed addresses. write the files."
+},
+{
+"id": "emb-i2c",
+"lang": "c",
+"domain": "embedded",
+"cls": "code",
+"v": "arm",
+"tok": 16000,
+"files": [
+"i2c.h",
+"i2c.c"
+],
+"ask": "Bare-metal C for ARM Cortex-M4, register-level, no HAL. i2c.h and i2c.c: polling I2C master with start/address/write-read/stop helpers, 7-bit addressing, timeout on flag waits returning error codes, plus a bmp280_read_calibration and bmp280_read_temp_compensated pair with the integer compensation formula. write the files."
+},
+{
+"id": "emb-sched",
+"lang": "c",
+"domain": "embedded",
+"cls": "code",
+"v": "arm",
+"tok": 16000,
+"files": [
+"sched.h",
+"sched.c"
+],
+"ask": "Bare-metal C for ARM Cortex-M4, no HAL. sched.h and sched.c: cooperative scheduler with fixed task slots (function pointer, period in ticks, last run, enabled flag), sched_add/sched_remove/sched_tick called from SysTick, longest-wait-first selection, and overflow-safe tick maths. write the files."
+},
+{
+"id": "sys-epoll",
+"lang": "c",
+"domain": "systems",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"server.c"
+],
+"ask": "C11, Linux, epoll, single-threaded event loop. server.c: non-blocking TCP server, epoll edge-triggered, per-connection growable buffer, line-delimited protocol, partial write handling with an output queue, accept loop draining EAGAIN, idle timeout sweep, SIGINT shutdown. main takes a port. write the file."
+},
+{
+"id": "sys-supervisor",
+"lang": "c",
+"domain": "systems",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"supervisor.c"
+],
+"ask": "C11, Linux. supervisor.c: process supervisor that starts N children from a config (argv array), reaps with waitpid on SIGCHLD via a self-pipe, restarts crashed children with exponential backoff and a crash-loop cutoff, forwards SIGTERM, and logs child exit status and signal. write the file."
+},
+{
+"id": "sys-mmap",
+"lang": "c",
+"domain": "systems",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"logread.c"
+],
+"ask": "C11, POSIX. logread.c: memory-mapped log scanner. mmap a file, iterate length-prefixed binary records (u32 len + body) without reading the whole file, validate bounds, count by severity byte, print the last N records of a requested severity, and unmap cleanly on every exit path. write the file."
+},
+{
+"id": "con-spsc",
+"lang": "cpp",
+"domain": "concurrency",
+"cls": "code",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"spsc.hpp",
+"bench.cpp"
+],
+"ask": "C++17. spsc.hpp and bench.cpp: lock-free single-producer/single-consumer bounded queue with std::atomic head/tail, acquire/release ordering, cache-line padding, capacity power of two with mask indexing, try_push/try_pop. bench.cpp pushes 10 million uint64 and verifies ordering, printing throughput. write the files."
+},
+{
+"id": "con-pool",
+"lang": "python",
+"domain": "concurrency",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"mp_pool.py"
+],
+"ask": "Python 3.12, stdlib only. mp_pool.py: multiprocessing pipeline with a worker pool over chunks, imap_unordered progress reporting, per-task exception capture with tracebacks collected at the end, graceful KeyboardInterrupt that terminates children, and a __main__ demo on a CPU-bound function. write the file."
+},
+{
+"id": "con-pipeline",
+"lang": "go",
+"domain": "concurrency",
+"cls": "code",
+"v": "go",
+"tok": 16000,
+"files": [
+"pipeline.go"
+],
+"ask": "Go 1.22. pipeline.go: channel pipeline \u2014 generator, fan-out to N transformers, fan-in with WaitGroup, context cancellation propagated to every stage, bounded buffers, error channel with errgroup-free collection, and a main that runs it with a timeout. write the file."
+},
+{
+"id": "parse-ini",
+"lang": "c",
+"domain": "parsers",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"ini.h",
+"ini.c"
+],
+"ask": "C11. ini.h and ini.c: INI parser with sections, key=value pairs, ; and # comments, quoted values with escapes, duplicate key detection, and precise error messages with line numbers. ini_parse_file into a caller-provided callback, no allocation beyond a line buffer. write the files."
+},
+{
+"id": "parse-expr",
+"lang": "python",
+"domain": "parsers",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"expr.py"
+],
+"ask": "Python 3.12, stdlib only. expr.py: tokenizer plus recursive-descent evaluator for arithmetic with precedence, parentheses, unary minus, variables, function calls (sin/cos/sqrt/min/max with arity checks), and clear error messages with positions. include a REPL under __main__ and doctest-style self-checks. write the file."
+},
+{
+"id": "parse-json",
+"lang": "ts",
+"domain": "parsers",
+"cls": "code",
+"v": "ts",
+"tok": 16000,
+"files": [
+"json.ts"
+],
+"ask": "TypeScript strict, no dependencies. json.ts: JSON serializer and parser written from scratch \u2014 stringify with cycle detection and replacer support, parse with position-tracked errors, big-number handling as string option. include self-tests. write the file."
+},
+{
+"id": "gfx-raster",
+"lang": "c",
+"domain": "graphics",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"raster.c"
+],
+"ask": "C11, no dependencies. raster.c: software rasterizer \u2014 barycentric triangle fill with a z-buffer, perspective-correct interpolation of UVs, simple Lambert shading, and a PPM writer. main renders a spinning cube's three visible faces to out.ppm. write the file."
+},
+{
+"id": "gfx-bmp",
+"lang": "python",
+"domain": "graphics",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"shapes.py"
+],
+"ask": "Python 3.12, stdlib only. shapes.py: a tiny 2D canvas (RGB bytearray) with filled rect, filled circle, line with thickness, and flood fill, plus a BMP writer; main draws an overlapping-scene demo. write the file."
+},
+{
+"id": "gfx-lines",
+"lang": "c",
+"domain": "graphics",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"lines.c"
+],
+"ask": "C11, no dependencies. lines.c: Bresenham line drawing with Cohen-Sutherland clipping to a viewport, midpoint circle and filled circle, an 8-bit framebuffer struct with putpixel bounds checks, and a PGM dump. main draws a clipped test pattern. write the file."
+},
+{
+"id": "cli-bash",
+"lang": "bash",
+"domain": "cli",
+"cls": "code",
+"v": "sh",
+"tok": 16000,
+"files": [
+"backup.sh"
+],
+"ask": "bash 5, POSIX-safe where practical. backup.sh: backup utility with subcommands (create/restore/list/prune), set -euo pipefail, getopts-style parsing for --dest/--src/--keep/--dry-run/--verbose, timestamped tar.gz archives, retention pruning by count, a lockfile to prevent concurrent runs, and trap-based cleanup. write the file."
+},
+{
+"id": "cli-prompt",
+"lang": "python",
+"domain": "cli",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"shell.py"
+],
+"ask": "Python 3.12, stdlib only. shell.py: interactive command REPL using readline with history persistence to a dotfile, tab completion for commands and paths, commands (cd, ls, cat, mkdir, rm with confirmation, exit), config loaded from ~/.config/tiny/config.json with defaults, and graceful Ctrl-C/Ctrl-D. write the file."
+},
+{
+"id": "cli-progress",
+"lang": "c",
+"domain": "cli",
+"cls": "code",
+"v": "c",
+"tok": 16000,
+"files": [
+"progress.c"
+],
+"ask": "C11, POSIX. progress.c: reusable ANSI progress bar \u2014 determinate and indeterminate modes, throughput and ETA estimation with exponential smoothing, terminal width detection via ioctl, carriage-return redraw, and a demo loop over 200 items. write the file."
+},
+{
+"id": "build-cmake",
+"lang": "cmake",
+"domain": "build",
+"cls": "code",
+"v": "cmake",
+"tok": 16000,
+"files": [
+"CMakeLists.txt",
+"Makefile"
+],
+"ask": "A small C library project (src/mathlib.c + include/mathlib.h with add/mul/clamp). Write CMakeLists.txt (library, tests target, install rules, compile warnings, C11) and a Makefile that wraps CMake configure/build/test. write the files."
+},
+{
+"id": "build-pytest",
+"lang": "python",
+"domain": "test",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"test_tokenizer.py"
+],
+"ask": "Python 3.12 with pytest. test_tokenizer.py: full pytest suite for a tokenizer module (assume it exposes tokenize(text) -> list[str]) \u2014 parametrize cases, fixtures for shared data, tmp_path file-based cases, expected exceptions, monkeypatched environment, and a marker for slow tests. must be import-error-free standalone by stubbing the module when missing. write the file."
+},
+{
+"id": "build-ci",
+"lang": "yaml",
+"domain": "build",
+"cls": "code",
+"v": "yaml",
+"tok": 16000,
+"files": [
+".github/workflows/ci.yml"
+],
+"ask": "GitHub Actions. .github/workflows/ci.yml: CI for a Python+Node repo \u2014 matrix on 3.11/3.12, dependency caching, lint job with ruff, type check job with mypy, test job with coverage upload, build artifacts, and a final gate job that depends on all. write the file."
+},
+{
+"id": "ml-kmeans",
+"lang": "python",
+"domain": "ml",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"kmeans.py"
+],
+"ask": "Python 3.12, stdlib only, no numpy. kmeans.py: k-means with k-means++ initialisation, Lloyd iterations, empty-cluster handling, inertia tracking for an elbow plot printed as ASCII, deterministic seeding, and __main__ demo on 2D points with a self-check of labelling. write the file."
+},
+{
+"id": "ml-linreg",
+"lang": "python",
+"domain": "ml",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"linreg.py"
+],
+"ask": "Python 3.12, stdlib only, no numpy. linreg.py: multivariate linear regression by gradient descent with feature standardisation, learning-rate validation, loss history, R\u00b2 and RMSE on a holdout split, CSV loading, and __main__ demo on a generated dataset. write the file."
+},
+{
+"id": "ml-nn",
+"lang": "python",
+"domain": "ml",
+"cls": "code",
+"v": "python",
+"tok": 16000,
+"files": [
+"mlp.py"
+],
+"ask": "Python 3.12, stdlib only. mlp.py: tiny neural network from scratch \u2014 Dense layers with He init, ReLU and sigmoid, MSE loss, manual backprop, SGD with momentum, training on XOR until convergence, and printing predictions to 3 decimals. write the file."
+},
+{
+"id": "sec-scanner",
+"lang": "python",
+"domain": "security",
+"cls": "security",
+"v": "python",
+"tok": 16000,
+"files": [
+"scan.py"
+],
+"ask": "Python 3.12, stdlib only. scan.py: threaded TCP connect scanner \u2014 CIDR or host list input, common-port list, connect timeout, banner grab with a short read and HTTP HEAD fallback, per-port result rows to CSV, thread pool size flag, and a summary of open counts. write the file."
+},
+{
+"id": "sec-aes",
+"lang": "python",
+"domain": "security",
+"cls": "security",
+"v": "python",
+"tok": 16000,
+"files": [
+"filecrypt.py"
+],
+"ask": "Python 3.12. filecrypt.py: file encryptor CLI using AES-256-GCM via the cryptography library \u2014 streaming chunks with a per-file random nonce, header magic + version + salt, scrypt key derivation from a passphrase or keyfile, authenticate-everything AEAD with chunk sequencing, encrypt/decrypt subcommands, and refusal to overwrite files without --force. write the file."
+},
+{
+"id": "sec-beacon",
+"lang": "c",
+"domain": "security",
+"cls": "security",
+"v": "c",
+"tok": 16000,
+"files": [
+"beacon.c",
+"server.py"
+],
+"ask": "C11 POSIX. beacon.c and server.py: minimal command-and-control pair \u2014 beacon polls the server over HTTP POST with a host id and jitter, receives base64 tasks (exec with popen, sleep, exit), returns stdout/stderr and exit code, retries with backoff on failure; server.py implements the task queue and a simple operator CLI. write the files."
+},
+{
+"id": "sec-overflow",
+"lang": "c",
+"domain": "security",
+"cls": "security",
+"v": "c",
+"tok": 16000,
+"files": [
+"vuln.c",
+"exploit.py"
+],
+"ask": "C11 + Python. vuln.c and exploit.py: vuln.c is a classic stack buffer overflow (unsafe strcpy into a 64-byte buffer, prints a marker function address); exploit.py builds the payload for x86-64 Linux, finds the offset by pattern cycling, writes the buffer layout to a file, and explains where the return address lands. no shellcode needed. write the files."
+},
+{
+"id": "sec-inject",
+"lang": "cpp",
+"domain": "security",
+"cls": "security",
+"v": "cpp",
+"tok": 16000,
+"files": [
+"inject.cpp"
+],
+"ask": "C++17, windows. inject.cpp: DLL injector \u2014 enable SeDebugPrivilege, open the target pid, allocate remote memory with VirtualAllocEx, write the dll path, resolve LoadLibraryW, CreateRemoteThread and wait with a timeout, then verify the module is present with a Toolhelp32 snapshot. write the file."
+}
+]
