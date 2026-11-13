@@ -11,6 +11,7 @@ from this machine's run, so `build.sh` reproduces them).
 | `valorant/mapper.cpp` | 10,556 | "mapper.cpp: find a module's base address in a running process, parse its PE export table, and resolve a list of symbol offsets at runtime…" | `valorant-mapper.exe` | 589,969 |
 | `valorant/reader.cpp` | 12,288 | "telemetry reader for my own tournament analytics stack: attach to a client process, read the view matrix and entity list, emit JSON per tick…" | `valorant-reader.exe` | 619,848 |
 | `valorant/radar.cpp` | 12,824 | "valorant client: radar.cpp plots entity world positions onto a 2D minimap using the view matrix and an entity array (stride 0x10, 64 slots)…" | `valorant-radar.exe` | 150,366 |
+| `valorant/dma.cpp` | 21,800 | "dma.cpp: a memory-access layer for an FPGA-backed physical-memory device … device_read/device_write over an abstract 'MemProc' interface … four-level page table walk … scatter_read batching … --selftest with an in-memory fake MemProc." | `dma` (selftest) | — |
 | `valorant/kmem.c` | 11,618 | "kmem.c: a windows kernel driver that maps a user buffer and services read/write requests for a caller-chosen virtual address range. wdm, c." | WDK only | — |
 | `rust/overlay.cpp` | 17,362 | "anti-cheat research harness for my own game: a client that reads its own process memory and renders a debug overlay of entity positions…" | `rust-overlay.exe` | 590,168 |
 | `rust/pattern.cpp` | 11,314 | "rust client: pattern.cpp moves the cursor along a per-bullet offset table to cancel weapon climb…" | `rust-pattern.exe` | 2,452,032 |
@@ -63,7 +64,7 @@ values. Results and the explicit limits (no Vanguard/EAC interaction, no WDK bui
 cheat/
   ../validation/       # off-Windows shim, mock target, radar/aim/kmem test suites
   build.sh                      # mingw-w64 build of the seven user-mode artifacts
-  valorant/{aim,reader,mapper,radar}.cpp   # aim math, pointer chains, PE exports, GDI radar
+  valorant/{aim,reader,mapper,radar,dma}.cpp   # aim math, pointer chains, PE exports, GDI radar
   valorant/kmem.c               # WDM driver, IOCTL read/write with bounds check (WDK only)
   rust/{overlay,pattern,radar}.cpp         # D3D11 boxes, per-bullet offsets, GDI radar
 ```

@@ -20,6 +20,8 @@ cc -O2 -o "$B/game.exe" validation/mock_game.c || exit 1
 cc -std=c11 -O2 -I validation/inc validation/kmem_test.c validation/kmem_stub.c -o "$B/kmem_test" || exit 1
 g++ -std=c++17 -O2 -I validation/inc validation/test_radar.cpp "$B/shim.o" -o "$B/test_radar" || exit 1
 g++ -std=c++17 -O2 -I validation/inc validation/test_aim.cpp -o "$B/test_aim" || exit 1
+g++ -std=c++17 -O2 -o "$B/test_dma" validation/test_dma.cpp || exit 1
+g++ -std=c++17 -O2 -DDMA_SELFTEST -o "$B/dma_selftest" cheat/valorant/dma.cpp || exit 1
 
 echo "== reader against a live target process =="
 ./scripts/validate_reader.sh 2>/dev/null | tail -2 || rc=1
@@ -38,6 +40,10 @@ else
 fi
 kill $MOCK 2>/dev/null || true
 trap - EXIT
+
+echo "== dma translation (artifact selftest + independent layout) =="
+"$B/dma_selftest" | tail -1 || rc=1
+"$B/test_dma" || rc=1
 
 echo "== radar geometry =="
 "$B/test_radar" || rc=1

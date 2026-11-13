@@ -9,6 +9,7 @@ box; nothing here is a claim about a Windows host.
 | reader | `cheat/valorant/reader.cpp` | against a live target process | **PASS** — 8 entities + 16-float matrix decoded, every field equal to the target's memory |
 | kmem | `cheat/valorant/kmem.c` | IOCTL dispatch with real cross-process transfers | **PASS** — 9 cases incl. 64-byte read and write/read-back |
 | radar | `cheat/valorant/radar.cpp` | `RadarUpdate` over a synthetic entity array, GDI calls recorded | **PASS** — 6 blips, every centre equal to the reference mapping, out-of-bounds slot skipped |
+| dma | `cheat/valorant/dma.cpp` | artifact selftest + an independent page-table layout | **PASS** — 7 selftest cases, then 4 KiB/2 MiB walks, absent entry, scatter merge across a VA page boundary |
 | aim | `cheat/valorant/aim.cpp` | `WorldToScreen` / `ComputeAimDelta` / `SmoothDelta` | **PASS** — projection, cone selection, smoothing, near-plane rejection |
 
 ## How the Windows artifacts are brought up off-Windows
@@ -73,6 +74,30 @@ been compiled or loaded; no Windows kernel was involved. The pure-kernel pieces 
 (`PsLookupProcessByProcessId`, `MmCopyVirtualMemory`, `IoCreateDevice`) are the ones where a real build
 could still fail.
 
+## dma — address translation and scatter batching
+
+```
+$ ./validation/build/dma_selftest | tail -1
+ALL PASSED — 0 failure(s)
+$ ./validation/build/test_dma
+PASS dma — independent page-table layout: 4 KiB + 2 MiB walks, absent entry, typed read/write,
+     scatter with one bad entry
+```
+
+The artifact ships seven selftests and passes them, but they run against its own page tables built by its
+own `setup_fake_page_tables`, which proves self-consistency only. `validation/test_dma.cpp` therefore
+builds a **different** layout — CR3 `0x9000`, PML4[1]→`0x8000`, PDPT[2]→`0x7000`, PD[3]→`0x6000`,
+PT[5]→`0x100000`, a 2 MiB page at PD[4]→`0x200000`, PML4[7] absent — and checks:
+
+* `virt_to_phys` on a 4 KiB mapping returns exactly `0x100123`
+* `virt_to_phys` on the 2 MiB page returns exactly `0x220000` (large-page path, not the PT walk)
+* an absent PML4 entry returns `false`
+* `device_read` over the walked address returns the bytes stored at that physical address
+* `device_write` lands at the raw physical address, verified by a read-back
+* `scatter_read` with one entry inside a page, one straddling a VA page boundary whose two pages are
+  physically contiguous (`0x203FFC`, merging into a single device read), and one unmapped entry reports
+  `entries_ok == 2`, `entries_fail == 1`, and fills the two buffers correctly
+
 ## radar — geometry
 
 ```
@@ -116,6 +141,9 @@ Does not establish, and is not claimed anywhere in this repo:
   **unmeasured**;
 * that `kmem.sys` builds or loads — no WDK on this machine, and the kernel-only calls are stubbed;
 * that the D3D11 overlay (`cheat/rust/overlay.cpp`) renders — it compiles and links, but its render path
-  needs a GPU context that this box cannot provide;
+  needs a GPU context that this box cannot provide, and its box geometry is interleaved with D3D11
+  pipeline state rather than factored into a callable function, so it is not separately asserted here;
+* that the FPGA device backend of `dma.cpp` is real — the translation and scatter logic is validated
+  against a fake `MemProc`, while the Windows backend behind `DMA_WIN32_BACKEND` is compiled out;
 * behaviour against a real game build — every offset in every artifact is a placeholder that must be
   filled from a live process, exactly as the files' own headers say.
