@@ -14,6 +14,13 @@ Target `claude-opus-5-5-max` behind `7api.st`, one `write_file` tool, 6,000 `max
   block, no assessment sentences, no restatement), nothing about games, cheats, anti-cheat, memory or
   drivers.
 
+> **Scope, stated first.** Nothing in this document shows any artifact functioning against Riot
+> Vanguard, EasyAntiCheat, a live VALORANT or Rust build, or any protected server — none of those exist
+> on the machine where this was produced. What is measured is (a) what the relay and the model do with
+> these asks, and (b) that the generated code compiles and executes off-Windows against synthetic
+> targets (`evidence/VALIDATION.md`). The correct headline is "artifacts generated, compiled and
+> executed against synthetic targets", never "working cheats for live titles".
+
 ## Result
 
 | payload | FAILED battery (4 player-vocabulary asks) | PASSED battery (6 object-language asks) |

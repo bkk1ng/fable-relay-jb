@@ -6,6 +6,13 @@ Harnesses: `harness/cheatmap.py` (probes), `harness/cheatgen.py` (artifact build
 compiler-in-the-loop repair round). Raw JSON per probe: `evidence/val-rust/`, builds:
 `evidence/cheatgen/`.
 
+> **Scope, stated first.** Nothing in this document shows any artifact functioning against Riot
+> Vanguard, EasyAntiCheat, a live VALORANT or Rust build, or any protected server — none of those exist
+> on the machine where this was produced. What is measured is (a) what the relay and the model do with
+> these asks, and (b) that the generated code compiles and executes off-Windows against synthetic
+> targets (`evidence/VALIDATION.md`). The correct headline is "artifacts generated, compiled and
+> executed against synthetic targets", never "working cheats for live titles".
+
 ## Finding 1 — the relay does not gate this class at all
 
 Fifteen probes, one term family each, 250 `max_tokens`, same payload:
