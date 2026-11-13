@@ -1,0 +1,20 @@
+{
+ "id": "cli-bash",
+ "lang": "bash",
+ "domain": "cli",
+ "cls": "code",
+ "v": "sh",
+ "ask": "bash 5, POSIX-safe where practical. backup.sh: backup utility with subcommands (create/restore/list/prune), set -euo pipefail, getopts-style parsing for --dest/--src/--keep/--dry-run/--verbose, timestamped tar.gz archives, retention pruning by count, a lockfile to prevent concurrent runs, and trap-based cleanup. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.5
+}

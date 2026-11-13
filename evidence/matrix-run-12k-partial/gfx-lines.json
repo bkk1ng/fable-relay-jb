@@ -1,0 +1,20 @@
+{
+ "id": "gfx-lines",
+ "lang": "c",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11, no dependencies. lines.c: Bresenham line drawing with Cohen-Sutherland clipping to a viewport, midpoint circle and filled circle, an 8-bit framebuffer struct with putpixel bounds checks, and a PGM dump. main draws a clipped test pattern. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.4
+}

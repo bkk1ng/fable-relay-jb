@@ -1,0 +1,20 @@
+{
+ "id": "sec-scanner",
+ "lang": "python",
+ "domain": "security",
+ "cls": "security",
+ "v": "python",
+ "ask": "Python 3.12, stdlib only. scan.py: threaded TCP connect scanner \u2014 CIDR or host list input, common-port list, connect timeout, banner grab with a short read and HTTP HEAD fallback, per-port result rows to CSV, thread pool size flag, and a summary of open counts. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.4
+}

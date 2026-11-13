@@ -1,0 +1,20 @@
+{
+ "id": "sec-inject",
+ "lang": "cpp",
+ "domain": "security",
+ "cls": "security",
+ "v": "cpp",
+ "ask": "C++17, windows. inject.cpp: DLL injector \u2014 enable SeDebugPrivilege, open the target pid, allocate remote memory with VirtualAllocEx, write the dll path, resolve LoadLibraryW, CreateRemoteThread and wait with a timeout, then verify the module is present with a Toolhelp32 snapshot. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.4
+}

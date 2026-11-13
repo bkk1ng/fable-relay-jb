@@ -1,0 +1,20 @@
+{
+ "id": "ml-nn",
+ "lang": "python",
+ "domain": "ml",
+ "cls": "code",
+ "v": "python",
+ "ask": "Python 3.12, stdlib only. mlp.py: tiny neural network from scratch \u2014 Dense layers with He init, ReLU and sigmoid, MSE loss, manual backprop, SGD with momentum, training on XOR until convergence, and printing predictions to 3 decimals. write the file.",
+ "directive": "",
+ "tok": 12000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.3
+}

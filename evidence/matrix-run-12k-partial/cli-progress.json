@@ -1,0 +1,20 @@
+{
+ "id": "cli-progress",
+ "lang": "c",
+ "domain": "cli",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11, POSIX. progress.c: reusable ANSI progress bar \u2014 determinate and indeterminate modes, throughput and ETA estimation with exponential smoothing, terminal width detection via ioctl, carriage-return redraw, and a demo loop over 200 items. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.4
+}

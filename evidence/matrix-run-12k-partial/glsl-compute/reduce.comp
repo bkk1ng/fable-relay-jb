@@ -1,0 +1,66 @@
+#version 450
+
+// Parallel reduction: sum a float array using tree reduction in shared memory.
+// local_size_x = 256. Each workgroup produces one partial sum.
+//
+// Host responsibilities:
+//   - Dispatch ceil(n / 256) workgroups in the x dimension.
+//   - Size partialSums to ceil(n / 256) elements.
+//   - For a final scalar, run a second pass (or read back and sum on the host)
+//     over partialSums.
+//   - If n == 0, dispatch zero workgroups (the shader does not guard against it
+//     because no workgroup would execute anyway).
+//
+// Build (example, glslangValidator):
+//   glslangValidator -V reduce.comp -o reduce.comp.spv
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer InputData {
+    float inputData[];
+};
+
+layout(set = 0, binding = 1) buffer PartialSums {
+    float partialSums[];
+};
+
+layout(set = 0, binding = 2) uniform Params {
+    uint n; // number of elements in inputData
+};
+
+shared float sharedData[256];
+
+void main()
+{
+    uint localIndex  = gl_LocalInvocationID.x;
+    uint globalIndex = gl_WorkGroupID.x * 256u + localIndex;
+    uint workgroupId = gl_WorkGroupID.x;
+
+    // Coalesce the global load: every thread reads one element.
+    // Threads whose global index is past the end of the array contribute 0.0,
+    // which is the correct zero-padding for a non-multiple input size.
+    float value = 0.0;
+    if (globalIndex < n) {
+        value = inputData[globalIndex];
+    }
+    sharedData[localIndex] = value;
+
+    // Wait for every invocation to finish writing shared memory before reduction.
+    barrier();
+
+    // In-place tree reduction across 256 lanes.
+    // stride: 128, 64, 32, 16, 8, 4, 2, 1
+    // Each step halves the active lanes; only the first `stride` threads participate.
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (localIndex < stride) {
+            sharedData[localIndex] += sharedData[localIndex + stride];
+        }
+        barrier();
+    }
+
+    // After the loop, sharedData[0] holds the sum of this workgroup's window.
+    // Thread 0 writes the single partial sum to the per-group output slot.
+    if (localIndex == 0u) {
+        partialSums[workgroupId] = sharedData[0];
+    }
+}

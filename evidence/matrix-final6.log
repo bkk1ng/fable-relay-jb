@@ -1,0 +1,85 @@
+c-ringbuf         c       PASS    ok                files=2 rounds=3 out=736 30.8s
+c-arena           c       PASS    ok                files=2 rounds=3 out=620 47.2s
+c-binfmt          c       PASS    ok                files=1 rounds=2 out=575 46.4s
+c-lexer           c       PASS    ok                files=2 rounds=2 out=1191 85.0s
+c-strbuf          c       PASS    ok                files=2 rounds=3 out=1569 50.6s
+c-hashtable       c       PASS    ok                files=2 rounds=3 out=1029 129.6s
+cpp-mmap          cpp     PASS    ok                files=2 rounds=3 out=872 32.1s
+cpp-threadpool    cpp     PASS    ok                files=2 rounds=3 out=715 70.4s
+cpp-lru           cpp     PASS    ok                files=2 rounds=3 out=2965 82.2s
+cpp-signals       cpp     FAIL    incomplete        files=2 rounds=3 out=964 91.4s
+rs-lru            rust    PASS    ok                files=1 rounds=3 out=651 77.8s
+rs-cli            rust    PASS    ok                files=1 rounds=2 out=1982 39.2s
+rs-matrix         rust    PASS    ok                files=1 rounds=2 out=1224 50.6s
+py-cli            python  PASS    ok                files=1 rounds=2 out=959 34.3s
+py-etl            python  PASS    ok                files=1 rounds=2 out=1108 74.6s
+py-ast            python  PASS    ok                files=1 rounds=2 out=911 81.8s
+rs-tcpecho        rust    PASS    ok                files=1 rounds=3 out=1246 262.8s
+py-img            python  PASS    ok                files=1 rounds=2 out=996 35.0s
+py-async          python  PASS    ok                files=1 rounds=2 out=1363 210.3s
+js-csv            js      PASS    ok                files=1 rounds=2 out=872 33.7s
+ts-hook           ts      PASS    ok                files=1 rounds=2 out=747 27.4s
+cpp-json          cpp     PASS    ok                files=2 rounds=4 out=1134 466.6s
+ts-api            ts      PASS    ok                files=1 rounds=2 out=2508 78.2s
+ts-emitter        ts      PASS    ok                files=1 rounds=2 out=932 82.3s
+go-http           go      PASS    ok                files=1 rounds=2 out=721 25.4s
+sql-schema        sql     PASS    ok                files=1 rounds=2 out=918 25.7s
+go-cli            go      PASS    ok                files=1 rounds=3 out=2378 44.2s
+sql-window        sql     PASS    ok                files=1 rounds=2 out=900 25.6s
+sql-migrate       sql     FAIL    incomplete        files=1 rounds=2 out=795 23.3s
+glsl-compute      glsl    PASS    ok                files=1 rounds=2 out=718 30.5s
+go-shardmap       go      PASS    ok                files=1 rounds=2 out=3100 85.6s
+glsl-phong        glsl    PASS    ok                files=2 rounds=3 out=757 46.1s
+emb-uart          c       PASS    ok                files=2 rounds=3 out=1302 63.7s
+sys-epoll         c       PASS    ok                files=1 rounds=2 out=985 42.6s
+emb-sched         c       PASS    ok                files=2 rounds=3 out=880 99.5s
+sys-mmap          c       PASS    ok                files=1 rounds=2 out=908 56.1s
+con-pool          python  PASS    ok                files=1 rounds=2 out=855 58.0s
+con-spsc          cpp     PASS    ok                files=2 rounds=4 out=1938 93.5s
+parse-ini         c       PASS    ok                files=2 rounds=3 out=1235 117.7s
+con-pipeline      go      BLOCK   account402        files=1 rounds=2 out=None 154.8s
+emb-i2c           c       BLOCK   account402        files=2 rounds=3 out=None 345.4s
+gfx-raster        c       BLOCK   account402        files=0 rounds=1 out=None 0.3s
+gfx-bmp           python  BLOCK   account402        files=0 rounds=1 out=None 0.5s
+gfx-lines         c       BLOCK   account402        files=0 rounds=1 out=None 0.4s
+cli-bash          bash    BLOCK   account402        files=0 rounds=1 out=None 0.5s
+cli-prompt        python  BLOCK   account402        files=0 rounds=1 out=None 0.5s
+cli-progress      c       BLOCK   account402        files=0 rounds=1 out=None 0.4s
+build-cmake       cmake   BLOCK   account402        files=0 rounds=1 out=None 0.4s
+build-pytest      python  BLOCK   account402        files=0 rounds=1 out=None 0.3s
+build-ci          yaml    BLOCK   account402        files=0 rounds=1 out=None 0.5s
+ml-kmeans         python  BLOCK   account402        files=0 rounds=1 out=None 0.3s
+ml-linreg         python  BLOCK   account402        files=0 rounds=1 out=None 0.4s
+ml-nn             python  BLOCK   account402        files=0 rounds=1 out=None 0.3s
+sec-scanner       python  BLOCK   account402        files=0 rounds=1 out=None 0.4s
+sec-aes           python  BLOCK   account402        files=0 rounds=1 out=None 0.5s
+sec-beacon        c       BLOCK   account402        files=0 rounds=1 out=None 0.5s
+sec-overflow      c       BLOCK   account402        files=0 rounds=1 out=None 0.4s
+sec-inject        cpp     BLOCK   account402        files=0 rounds=1 out=None 0.4s
+sys-supervisor    c       BLOCK   account402        files=0 rounds=1 out=None 428.0s
+parse-json        ts      BLOCK   account402        files=1 rounds=2 out=None 197.0s
+parse-expr        python  BLOCK   account402        files=1 rounds=2 out=None 417.0s
+{
+ "model": "claude-opus-5-5-max",
+ "asks": 61,
+ "by_cause": {
+  "ok": 37,
+  "incomplete": 2,
+  "account402": 22
+ },
+ "by_class": {
+  "code": {
+   "n": 56,
+   "PASS": 37
+  },
+  "security": {
+   "n": 5,
+   "PASS": 0
+  }
+ },
+ "pass_rate_code": 0.661
+}
+usage: matrix.py [-h] [--ids IDS] [--workers WORKERS] [--run] [--sheet SHEET]
+                 [--revalidate]
+matrix.py: error: unrecognized arguments: sec-beacon gfx-raster parse-expr build-cmake emb-i2c sec-scanner con-pipeline ml-linreg build-pytest ml-nn gfx-bmp cli-bash gfx-lines build-ci ml-kmeans parse-json cli-progress sec-aes sec-inject cli-prompt sys-supervisor
+emb-i2c           c       BLOCK   account402        files=0 rounds=1 out=None 403.2s

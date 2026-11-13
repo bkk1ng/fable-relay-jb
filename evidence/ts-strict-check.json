@@ -1,0 +1,30 @@
+[
+ [
+  "parse-json",
+  "PASS",
+  "PASS",
+  []
+ ],
+ [
+  "ts-api",
+  "PASS",
+  "PASS",
+  []
+ ],
+ [
+  "ts-emitter",
+  "PASS",
+  "FAIL",
+  [
+   "2394"
+  ]
+ ],
+ [
+  "ts-hook",
+  "PASS",
+  "FAIL",
+  [
+   "2307"
+  ]
+ ]
+]

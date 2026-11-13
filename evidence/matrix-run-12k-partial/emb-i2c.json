@@ -1,0 +1,20 @@
+{
+ "id": "emb-i2c",
+ "lang": "c",
+ "domain": "embedded",
+ "cls": "code",
+ "v": "arm",
+ "ask": "Bare-metal C for ARM Cortex-M4, register-level, no HAL. i2c.h and i2c.c: polling I2C master with start/address/write-read/stop helpers, 7-bit addressing, timeout on flag waits returning error codes, plus a bmp280_read_calibration and bmp280_read_temp_compensated pair with the integer compensation formula. write the files.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 403.2
+}

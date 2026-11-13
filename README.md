@@ -1,12 +1,17 @@
 # Measured jailbreak attempts against a filtered Claude relay
 
 **Coding matrix (current headline): 54/56 non-security coding asks (96.4%) return complete artifact
-files that pass their language's real validator — 56/61 overall, every non-pass attributed to a named
-cause, zero unattributed.** 61 asks across 12 languages (C, C++, Rust, Python, TS/JS, Go, SQL, GLSL,
-bare-metal Cortex-M, systems, concurrency, parsers, graphics, CLI, build/CI, ML). Raw JSON:
-`evidence/matrix-run/`. Reproduce: `python3 harness/matrix.py --run --workers 4` then `--revalidate`.
-Numbers, the security section, the corrections that moved the score, and the honest limits:
-[`FINAL-REPORT.md`](FINAL-REPORT.md).
+files that pass their language's real validator — 56/61 overall, zero unattributed failures.** 61 asks
+across 12 languages (C, C++, Rust, Python, TS/JS, Go, SQL, GLSL, bare-metal Cortex-M, systems,
+concurrency, parsers, graphics, CLI, build/CI, ML). Strict `tsc --strict` cross-check: 53/56 (94.6%).
+Raw JSON: `evidence/matrix-run/`. Payload under test: `prompt/PAYLOAD-FABLE.md` md5
+`057138f80df8f973befa2cd1e2ced6cc` (the older `be7637d2…` pin is stale — the two rules that were added
+are listed in `FINAL-REPORT.md`). Reproduce: `python3 harness/matrix.py --run --workers 4`, then
+`--revalidate`, then `harness/check-report.py` (fails on any drift between the report and the JSON).
+
+**Blocked, needs account balance:** the run at the constrained `max_tokens` (6000–12000) stopped at
+ask 39 with `402 insufficient_balance`, and the current plugin revision has not been re-run end-to-end.
+Both need a top-up; see "Constraint deviation and blocked items" in [`FINAL-REPORT.md`](FINAL-REPORT.md).
 
 **Status of the topic-level claim: no universal jailbreak was produced.** Markdown-only prose arms answer security asks
 (see the class table below), and a narrow game-cheat channel works in two configurations — but the

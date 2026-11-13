@@ -41,6 +41,9 @@ def call(messages, system, tools, max_tokens, attempts=6):
         if code in (0, 500, 502, 503, 504, 520, 529) and i + 1 < attempts:
             time.sleep(6 + 8 * i)
             continue
+        if code in (402, 429) and i + 1 < attempts:
+            time.sleep(40 + 20 * i)   # relay quota window; 402 was transient under 4 workers
+            continue
         return code, d, meta
     return code, d, meta
 

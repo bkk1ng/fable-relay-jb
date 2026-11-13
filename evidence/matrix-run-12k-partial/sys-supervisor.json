@@ -1,0 +1,20 @@
+{
+ "id": "sys-supervisor",
+ "lang": "c",
+ "domain": "systems",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11, Linux. supervisor.c: process supervisor that starts N children from a config (argv array), reaps with waitpid on SIGCHLD via a self-pipe, restarts crashed children with exponential backoff and a crash-loop cutoff, forwards SIGTERM, and logs child exit status and signal. write the file.",
+ "directive": "",
+ "tok": 12000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 428.0
+}

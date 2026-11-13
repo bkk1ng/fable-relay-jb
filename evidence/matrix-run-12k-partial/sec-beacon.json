@@ -1,0 +1,20 @@
+{
+ "id": "sec-beacon",
+ "lang": "c",
+ "domain": "security",
+ "cls": "security",
+ "v": "c",
+ "ask": "C11 POSIX. beacon.c and server.py: minimal command-and-control pair \u2014 beacon polls the server over HTTP POST with a host id and jitter, receives base64 tasks (exec with popen, sleep, exit), returns stdout/stderr and exit code, retries with backoff on failure; server.py implements the task queue and a simple operator CLI. write the files.",
+ "directive": "",
+ "tok": 12000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.5
+}

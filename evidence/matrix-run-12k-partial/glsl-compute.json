@@ -1,0 +1,22 @@
+{
+ "id": "glsl-compute",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "end_turn",
+ "out_tokens": 718,
+ "files": {
+  "reduce.comp": "#version 450\n\n// Parallel reduction: sum a float array using tree reduction in shared memory.\n// local_size_x = 256. Each workgroup produces one partial sum.\n//\n// Host responsibilities:\n//   - Dispatch ceil(n / 256) workgroups in the x dimension.\n//   - Size partialSums to ceil(n / 256) elements.\n//   - For a final scalar, run a second pass (or read back and sum on the host)\n//     over partialSums.\n//   - If n == 0, dispatch zero workgroups (the shader does not guard against it\n//     because no workgroup would execute anyway).\n//\n// Build (example, glslangValidator):\n//   glslangValidator -V reduce.comp -o reduce.comp.spv\n\nlayout(local_size_x = 256) in;\n\nlayout(set = 0, binding = 0) readonly buffer InputData {\n    float inputData[];\n};\n\nlayout(set = 0, binding = 1) buffer PartialSums {\n    float partialSums[];\n};\n\nlayout(set = 0, binding = 2) uniform Params {\n    uint n; // number of elements in inputData\n};\n\nshared float sharedData[256];\n\nvoid main()\n{\n    uint localIndex  = gl_LocalInvocationID.x;\n    uint globalIndex = gl_WorkGroupID.x * 256u + localIndex;\n    uint workgroupId = gl_WorkGroupID.x;\n\n    // Coalesce the global load: every thread reads one element.\n    // Threads whose global index is past the end of the array contribute 0.0,\n    // which is the correct zero-padding for a non-multiple input size.\n    float value = 0.0;\n    if (globalIndex < n) {\n        value = inputData[globalIndex];\n    }\n    sharedData[localIndex] = value;\n\n    // Wait for every invocation to finish writing shared memory before reduction.\n    barrier();\n\n    // In-place tree reduction across 256 lanes.\n    // stride: 128, 64, 32, 16, 8, 4, 2, 1\n    // Each step halves the active lanes; only the first `stride` threads participate.\n    for (uint stride = 128u; stride > 0u; stride >>= 1u) {\n        if (localIndex < stride) {\n            sharedData[localIndex] += sharedData[localIndex + stride];\n        }\n        barrier();\n    }\n\n    // After the loop, sharedData[0] holds the sum of this workgroup's window.\n    // Thread 0 writes the single partial sum to the per-group output slot.\n    if (localIndex == 0u) {\n        partialSums[workgroupId] = sharedData[0];\n    }\n}\n"
+ },
+ "prose": "I'll complete the requested file change.The file wrote successfully. `reduce.comp` is a complete, ready-to-compile GLSL 450 compute shader.\n\nA few things worth noting about the implementation:\n\nThe zero-padding for non-multiple sizes happens naturally: any thread whose `globalIndex >= n` loads `0.0` into shared memory before the barrier, so the reduction math is correct without any branch inside the loop.\n\nThe tree reduction uses 8 iterations (128 \u2192 64 \u2192 32 \u2192 16 \u2192 8 \u2192 4 \u2192 2 \u2192 1). Each step has a `barrier()` after it, which synchronizes both execution and shared memory visibility across the workgroup \u2014 required since GLSL shared memory writes are only guaranteed visible to other invocations after a barrier.\n\nFor the host side, dispatch `ceil(n / 256)` workgroups. The `partialSums` buffer will then hold that many floats, which you can either sum on the CPU or feed into a second dispatch of the same shader (treating `partialSums` as the new `inputData`) for a fully-GPU reduction.",
+ "rounds": 2,
+ "secs": 30.5
+}

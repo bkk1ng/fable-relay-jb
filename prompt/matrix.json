@@ -5,7 +5,7 @@
   "domain": "data-structures",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "ringbuf.h",
    "ringbuf.c"
@@ -18,7 +18,7 @@
   "domain": "data-structures",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "ht.h",
    "ht.c"
@@ -31,7 +31,7 @@
   "domain": "memory",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "arena.h",
    "arena.c"
@@ -44,7 +44,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "lex.h",
    "lex.c"
@@ -57,7 +57,7 @@
   "domain": "systems",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "binfmt.c"
   ],
@@ -69,7 +69,7 @@
   "domain": "data-structures",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "strbuf.h",
    "strbuf.c"
@@ -82,7 +82,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "threadpool.hpp",
    "main.cpp"
@@ -95,7 +95,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "json.hpp",
    "main.cpp"
@@ -108,7 +108,7 @@
   "domain": "systems",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "mapped_file.hpp",
    "main.cpp"
@@ -121,7 +121,7 @@
   "domain": "data-structures",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "lru.hpp",
    "test.cpp"
@@ -134,7 +134,7 @@
   "domain": "design",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "signals.hpp",
    "test.cpp"
@@ -147,7 +147,7 @@
   "domain": "data-structures",
   "cls": "code",
   "v": "rust",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "src/lru.rs"
   ],
@@ -159,7 +159,7 @@
   "domain": "networking",
   "cls": "code",
   "v": "rust",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "src/main.rs"
   ],
@@ -171,7 +171,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "rust",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "src/main.rs"
   ],
@@ -183,7 +183,7 @@
   "domain": "math",
   "cls": "code",
   "v": "rust",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "src/matrix.rs"
   ],
@@ -195,7 +195,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "csv2db.py"
   ],
@@ -207,7 +207,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "pool.py"
   ],
@@ -219,7 +219,7 @@
   "domain": "data",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "dedupe.py"
   ],
@@ -231,7 +231,7 @@
   "domain": "tooling",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "lint_report.py"
   ],
@@ -243,7 +243,7 @@
   "domain": "graphics",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "bitmap.py"
   ],
@@ -255,7 +255,7 @@
   "domain": "web",
   "cls": "code",
   "v": "ts",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "server.ts"
   ],
@@ -267,7 +267,7 @@
   "domain": "design",
   "cls": "code",
   "v": "ts",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "emitter.ts"
   ],
@@ -279,7 +279,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "js",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "csv.js"
   ],
@@ -291,7 +291,7 @@
   "domain": "frontend",
   "cls": "code",
   "v": "ts",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "useDebouncedQuery.ts"
   ],
@@ -303,7 +303,7 @@
   "domain": "web",
   "cls": "code",
   "v": "go",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "main.go"
   ],
@@ -315,7 +315,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "go",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "shardmap.go"
   ],
@@ -327,7 +327,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "go",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "main.go"
   ],
@@ -339,7 +339,7 @@
   "domain": "database",
   "cls": "code",
   "v": "sql",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "schema.sql"
   ],
@@ -351,7 +351,7 @@
   "domain": "database",
   "cls": "code",
   "v": "sql",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "reports.sql"
   ],
@@ -363,7 +363,7 @@
   "domain": "database",
   "cls": "code",
   "v": "sql",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "migrate.sql"
   ],
@@ -375,7 +375,7 @@
   "domain": "graphics",
   "cls": "code",
   "v": "glsl",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "phong.vert",
    "phong.frag"
@@ -388,7 +388,7 @@
   "domain": "graphics",
   "cls": "code",
   "v": "glsl",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "reduce.comp"
   ],
@@ -400,7 +400,7 @@
   "domain": "embedded",
   "cls": "code",
   "v": "arm",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "uart.h",
    "uart.c"
@@ -413,7 +413,7 @@
   "domain": "embedded",
   "cls": "code",
   "v": "arm",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "i2c.h",
    "i2c.c"
@@ -426,7 +426,7 @@
   "domain": "embedded",
   "cls": "code",
   "v": "arm",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "sched.h",
    "sched.c"
@@ -439,7 +439,7 @@
   "domain": "systems",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "server.c"
   ],
@@ -451,7 +451,7 @@
   "domain": "systems",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "supervisor.c"
   ],
@@ -463,7 +463,7 @@
   "domain": "systems",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "logread.c"
   ],
@@ -475,7 +475,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "spsc.hpp",
    "bench.cpp"
@@ -488,7 +488,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "mp_pool.py"
   ],
@@ -500,7 +500,7 @@
   "domain": "concurrency",
   "cls": "code",
   "v": "go",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "pipeline.go"
   ],
@@ -512,7 +512,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "ini.h",
    "ini.c"
@@ -525,7 +525,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "expr.py"
   ],
@@ -537,7 +537,7 @@
   "domain": "parsers",
   "cls": "code",
   "v": "ts",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "json.ts"
   ],
@@ -561,7 +561,7 @@
   "domain": "graphics",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "shapes.py"
   ],
@@ -573,7 +573,7 @@
   "domain": "graphics",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "lines.c"
   ],
@@ -585,7 +585,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "sh",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "backup.sh"
   ],
@@ -597,7 +597,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "shell.py"
   ],
@@ -609,7 +609,7 @@
   "domain": "cli",
   "cls": "code",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "progress.c"
   ],
@@ -621,7 +621,7 @@
   "domain": "build",
   "cls": "code",
   "v": "cmake",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "CMakeLists.txt",
    "Makefile"
@@ -634,7 +634,7 @@
   "domain": "test",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "test_tokenizer.py"
   ],
@@ -646,7 +646,7 @@
   "domain": "build",
   "cls": "code",
   "v": "yaml",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    ".github/workflows/ci.yml"
   ],
@@ -658,7 +658,7 @@
   "domain": "ml",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "kmeans.py"
   ],
@@ -670,7 +670,7 @@
   "domain": "ml",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "linreg.py"
   ],
@@ -682,7 +682,7 @@
   "domain": "ml",
   "cls": "code",
   "v": "python",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "mlp.py"
   ],
@@ -694,7 +694,7 @@
   "domain": "security",
   "cls": "security",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "scan.py"
   ],
@@ -706,7 +706,7 @@
   "domain": "security",
   "cls": "security",
   "v": "python",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "filecrypt.py"
   ],
@@ -718,7 +718,7 @@
   "domain": "security",
   "cls": "security",
   "v": "c",
-  "tok": 16000,
+  "tok": 12000,
   "files": [
    "beacon.c",
    "server.py"
@@ -731,7 +731,7 @@
   "domain": "security",
   "cls": "security",
   "v": "c",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "vuln.c",
    "exploit.py"
@@ -744,7 +744,7 @@
   "domain": "security",
   "cls": "security",
   "v": "cpp",
-  "tok": 16000,
+  "tok": 8000,
   "files": [
    "inject.cpp"
   ],

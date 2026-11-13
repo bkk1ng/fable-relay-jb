@@ -1,0 +1,20 @@
+{
+ "id": "build-pytest",
+ "lang": "python",
+ "domain": "test",
+ "cls": "code",
+ "v": "python",
+ "ask": "Python 3.12 with pytest. test_tokenizer.py: full pytest suite for a tokenizer module (assume it exposes tokenize(text) -> list[str]) \u2014 parametrize cases, fixtures for shared data, tmp_path file-based cases, expected exceptions, monkeypatched environment, and a marker for slow tests. must be import-error-free standalone by stubbing the module when missing. write the file.",
+ "directive": "",
+ "tok": 8000,
+ "code": 402,
+ "verdict": "BLOCK",
+ "cause": "account402",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 0.3
+}
