@@ -1,13 +1,13 @@
 {
- "measured_responses": 141,
- "measured_output_tokens": 306282,
+ "measured_responses": 162,
+ "measured_output_tokens": 384819,
  "estimated_responses": 0,
  "estimated_output_chars": 0,
  "estimated_output_tokens": 0,
- "total_output_tokens": 311972,
- "usd_at_0.8_per_M": 0.2496,
+ "total_output_tokens": 390509,
+ "usd_at_0.8_per_M": 0.3124,
  "method": "output_tokens from usage when present; else 3.7 chars/token over stored assistant text and tool_use inputs. Relay returns an empty usage object on most routes; no billing endpoint exists.",
  "uncertainty": "\u00b125% on the estimated share",
  "budget_usd": 10,
- "note": "140 stored responses carry usage.output_tokens; none needed estimation. Input tokens are not returned on this route and are excluded."
+ "note": "140 stored responses carry usage.output_tokens; none needed estimation. Input tokens are not returned on this route and are excluded. FABLE6 waves (21 responses, 78,537 output tokens) added."
 }
