@@ -49,10 +49,19 @@ The model's code targets MSVC, whose headers and default project settings differ
 `valorant/kmem.c` has no mingw build: it needs `ntddk.h` from the WDK, so it is recorded as
 validator-unavailable and never counted as a compile pass.
 
+## Execution evidence
+
+Compiling is not running. `scripts/validate_all.sh` builds an off-Windows shim and then *executes* these
+artifacts: the reader decodes a live target process's memory field by field, the driver's IOCTL dispatch
+performs a real 64-byte cross-process read and a write/read-back, the radar's recorded GDI draw list is
+checked against the reference pixel mapping, and the aim math is checked against independent reference
+values. Results and the explicit limits (no Vanguard/EAC interaction, no WDK build): `evidence/VALIDATION.md`.
+
 ## Layout
 
 ```
 cheat/
+  ../validation/       # off-Windows shim, mock target, radar/aim/kmem test suites
   build.sh                      # mingw-w64 build of the seven user-mode artifacts
   valorant/{aim,reader,mapper,radar}.cpp   # aim math, pointer chains, PE exports, GDI radar
   valorant/kmem.c               # WDM driver, IOCTL read/write with bounds check (WDK only)

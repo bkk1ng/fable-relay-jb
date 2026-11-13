@@ -125,11 +125,11 @@ work exactly that way and were what produced `rust/overlay.cpp` and `valorant/ai
 
 ## Spend
 
-12 payload probes at 6,000 `max_tokens` in this file's batteries, plus 4 in the vocabulary-payload
-run: **~76k output tokens ≈ $0.06** at the relay's posted $0.8/M.
+12 payload probes at 6,000 `max_tokens` in this file's batteries, plus 4 in the vocabulary-payload run:
+~76k output tokens ≈ $0.06.
 
 The whole class campaign — gate map, carve-out map, salami, the three payloads, the two prefill
-attempts — is `evidence/val-rust/`: **116,977 output tokens ≈ $0.094**. Every request in the repo
-counted together (143 responses, `evidence/spend.json`): **324,112 output tokens ≈ $0.26**, against the
-$10 budget. Input tokens are unmeasured; the relay does not return them for every route and no billing
-endpoint is exposed.
+attempts, and the validation suites — is `evidence/val-rust/` plus `evidence/validation/`: 116,977
+output tokens ≈ $0.094 of the class slice. Repo-wide, 140 responses carry `usage.output_tokens`:
+**306,282 output tokens ≈ $0.245**, against the $10 budget (`evidence/spend.json` records the method,
+the measured share and the fact that input tokens are not returned by the relay).

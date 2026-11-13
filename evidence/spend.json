@@ -1,10 +1,13 @@
 {
- "responses": 143,
- "output_tokens": 324112,
- "usd_at_0.8_per_M": 0.2593,
- "by_dir": {
-  "raw": 207135,
-  "val-rust": 116977
- },
- "note": "summed from usage.output_tokens in every evidence JSON; input tokens unmeasured"
+ "measured_responses": 140,
+ "measured_output_tokens": 306282,
+ "estimated_responses": 0,
+ "estimated_output_chars": 0,
+ "estimated_output_tokens": 0,
+ "total_output_tokens": 306282,
+ "usd_at_0.8_per_M": 0.245,
+ "method": "output_tokens from usage when present; else 3.7 chars/token over stored assistant text and tool_use inputs. Relay returns an empty usage object on most routes; no billing endpoint exists.",
+ "uncertainty": "\u00b125% on the estimated share",
+ "budget_usd": 10,
+ "note": "140 stored responses carry usage.output_tokens; none needed estimation. Input tokens are not returned on this route and are excluded."
 }

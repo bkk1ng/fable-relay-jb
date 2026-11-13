@@ -212,7 +212,9 @@ Not part of the coding matrix above. Its record is `evidence/VALORANT-RUST.md` (
 map, verbatim refusals, salami decomposition) and `evidence/CHEAT-PAYLOAD.md` (three payloads × ten
 asks, asset no-vocabulary rule, the prefill gate). Delivered and compiled artifacts: `cheat/` — four
 VALORANT user-mode binaries plus `kmem.c` (WDK only) and three Rust binaries, provenance in
-`cheat/README.md`. Spend for that campaign: 116,977 output tokens ≈ $0.094.
+`cheat/README.md`. Spend for that campaign: 116,977 output tokens ≈ $0.094. Execution evidence — the artifacts run against
+a live target process, not merely compile — is `evidence/VALIDATION.md`; the parts that cannot be
+validated on this host (Vanguard, EAC, the WDK build, GPU rendering) are named there rather than scored.
 
 ## Reproduce
 

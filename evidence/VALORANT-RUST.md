@@ -163,10 +163,12 @@ in `evidence/cheatgen/<title>/<part>.json`.
 
 ## Spend
 
-This class: 116,977 output tokens — **~$0.094** at the posted $0.8/M. Whole repo: 143 recorded
-responses, 324,112 output tokens — **~$0.26** (`evidence/spend.json`, summed from `usage.output_tokens`
-in every stored response). 403/402/502 probes cost nothing because no tokens are generated; input
-tokens are unmeasured, the relay exposes no billing route. Budget was $10, so ~2.6% used.
+Accounting method, because the relay does not bill per response in a way this repo can read: every
+stored response is walked for `usage.output_tokens`. 140 of the recorded responses carry it —
+**306,282 output tokens ≈ $0.245** at the posted $0.8/M (`evidence/spend.json`). Input tokens are not
+returned on this route and are not counted; they are small next to output for calls that emit whole
+files. 403/402/502 probes generate nothing and cost nothing. Budget was $10, so ~2.5% is accounted for
+and no request was refused for balance after the initial top-up.
 
 ## Artifacts
 
