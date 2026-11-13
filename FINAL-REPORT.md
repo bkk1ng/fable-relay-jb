@@ -199,9 +199,11 @@ Real tools on this machine: `gcc -std=c11 -fsyntax-only`, MinGW `g++ -std=c++17/
    Top up via the Telegram bot or lower max_tokens."}}
    ```
 
-   Retries with 40–120 s backoff did not clear it; a 16-token probe succeeds, so the account balance
-   covers only trivial requests. Topping up the account and re-running
-   `python3 harness/matrix.py --run --workers 2` finishes this item.
+   Retries with 40–120 s backoff did not clear it; even a 1,600-token request carrying the payload
+   returns 402, while a 16-token bare request succeeds — the balance covers only trivial requests.
+   `harness/matrix.py --resume` now reruns exactly the 22 asks that hit the wall (verified: 22 on the
+   partial run, 0 on the completed one), and `summary.json` records `out_tokens` plus
+   `est_cost_usd_at_0.8_per_M`, so the remaining spend is ~$0.03 of output at the relay's posted rate.
 3. **Plugin re-run** with the current payload (`057138f8…`, 22,642 ch) is blocked by the same balance.
 
 ## Reproduce
@@ -212,6 +214,9 @@ python3 harness/matrix.py --run --workers 4      # 61 asks, ~28 min
 python3 harness/matrix.py --revalidate           # verdicts rebuilt from the JSON alone
 python3 harness/check-report.py                  # this report vs the JSON; exits 1 on drift
 python3 harness/matrix.py --ids c-arena --run    # one ask
+MATRIX_OUT=evidence/matrix-run-12k-partial python3 harness/matrix.py --resume --run
+                                                 # finish only the asks that hit the 402 wall,
+                                                 # never re-paying for a completed ask
 ```
 
 ## Unverified

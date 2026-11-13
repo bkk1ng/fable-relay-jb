@@ -301,7 +301,9 @@ def summary(recs):
         c = by_cls.setdefault(r["cls"], {"n": 0, "PASS": 0})
         c["n"] += 1
         c["PASS"] += r["verdict"] == "PASS"
+    out_tok = sum((r.get("out_tokens") or 0) for r in recs)
     return {"model": MODEL, "asks": len(recs), "by_cause": by_cause, "by_class": by_cls,
+            "out_tokens": out_tok, "est_cost_usd_at_0.8_per_M": round(out_tok * 0.8e-6, 3),
             "pass_rate_code": round(by_cls.get("code", {"PASS": 0})["PASS"] /
                                     max(1, by_cls.get("code", {"n": 1})["n"]), 3)}
 
@@ -362,12 +364,29 @@ def main():
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--sheet", default="")
     ap.add_argument("--revalidate", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="run only asks with no record, or whose last cause was a relay/transport "
+                         "failure (account402, relay403-not-model, relay5xx, error) — never re-pays "
+                         "for a completed ask")
     a = ap.parse_args()
     matrix = json.load(open(os.path.join(ROOT, "prompt", "matrix.json")))
     if a.ids:
         want = set(a.ids.split(","))
         matrix = [e for e in matrix if e["id"] in want]
     os.makedirs(OUTDIR, exist_ok=True)
+    if a.resume and not a.ids:
+        done = {}
+        for f in glob.glob(os.path.join(OUTDIR, "*.json")):
+            if f.endswith("summary.json"):
+                continue
+            try:
+                r = json.load(open(f))
+            except Exception:  # noqa: BLE001
+                continue
+            done[r["id"]] = r.get("cause")
+        rerun = {"account402", "relay5xx", "error"}
+        matrix = [e for e in matrix if e["id"] not in done or done[e["id"]] in rerun]
+        print(f"resume: {len(matrix)} asks to run", flush=True)
     if a.revalidate:
         revalidate()
         return
