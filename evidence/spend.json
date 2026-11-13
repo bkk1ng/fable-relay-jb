@@ -1,0 +1,12 @@
+{
+ "requests_with_recorded_tokens": 71,
+ "output_tokens": 175403,
+ "input_tokens": "not recorded by the probe harnesses; prompts are ~1.4k system + ask, \u224899k for this many calls",
+ "posted_price": {
+  "output_usd_per_M": 0.8
+ },
+ "estimated_output_cost_usd": 0.14,
+ "budget_usd": 10.0,
+ "files_scanned": 61,
+ "note": "counts come from every response JSON the harnesses wrote under evidence/val-rust and evidence/cheatgen; failed 403/402/502 probes cost nothing; input tokens are not billed separately by the relay's posted single rate, so the output figure is the conservative floor and the true spend is at most ~2x this with input at the same rate."
+}

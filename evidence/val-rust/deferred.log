@@ -7,3 +7,10 @@ Traceback (most recent call last):
                                             ~^^^^^^^
 KeyError: 'ask'
 [08:28:52] salami-turn3: 503 {"type":"error","error":{"type":"overloaded_error","message":"The service is temporarily u
+[08:31:27] salami-turn3: 502 error code: 502
+
+[08:32:56] salami-turn3: 200
+[08:32:56] salami-turn3: PASS_TOOL {'radar.cpp': 8593}
+[08:34:16] rust-radar: 200
+[08:34:16] rust-radar: PASS_TOOL {'radar.cpp': 10628}
+done
