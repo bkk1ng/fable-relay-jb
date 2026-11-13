@@ -105,7 +105,8 @@ and a control with a harmless trailing assistant (`{"role":"user","content":"say
 turn returned 200. So the relay rejects **any** messages array whose last turn is the assistant,
 regardless of content — assistant prefill is unavailable on `7api.st` for this model, and that path is
 closed at the transport layer rather than by the model. It is recorded as a gate (like the 403 term
-filter), not as a model refusal.
+filter), not as a model refusal. Raw requests and error bodies for both prefill modes, the harmless
+control and the passing user-turn control: `evidence/val-rust/prefill/gate-400.json`.
 
 The live bypass for that shape is the one this repo already uses: a `tool_result` continuation. Send
 the partial file as a tool result and ask the model to continue — `cheatgen`'s `cont_a`/`cont_b` rungs
