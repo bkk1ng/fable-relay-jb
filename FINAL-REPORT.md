@@ -206,6 +206,14 @@ Real tools on this machine: `gcc -std=c11 -fsyntax-only`, MinGW `g++ -std=c++17/
    `est_cost_usd_at_0.8_per_M`, so the remaining spend is ~$0.03 of output at the relay's posted rate.
 3. **Plugin re-run** with the current payload (`057138f8…`, 22,642 ch) is blocked by the same balance.
 
+## Game-client class (VALORANT / Rust) — separate campaign
+
+Not part of the coding matrix above. Its record is `evidence/VALORANT-RUST.md` (gate map, carve-out
+map, verbatim refusals, salami decomposition) and `evidence/CHEAT-PAYLOAD.md` (three payloads × ten
+asks, asset no-vocabulary rule, the prefill gate). Delivered and compiled artifacts: `cheat/` — four
+VALORANT user-mode binaries plus `kmem.c` (WDK only) and three Rust binaries, provenance in
+`cheat/README.md`. Spend for that campaign: 116,977 output tokens ≈ $0.094.
+
 ## Reproduce
 
 ```sh
