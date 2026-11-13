@@ -1,0 +1,22 @@
+{
+ "id": "build-cmake",
+ "lang": "cmake",
+ "domain": "build",
+ "cls": "code",
+ "v": "cmake",
+ "ask": "A small C library project (src/mathlib.c + include/mathlib.h with add/mul/clamp). Write CMakeLists.txt (library, tests target, install rules, compile warnings, C11) and a Makefile that wraps CMake configure/build/test. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "CMakeLists.txt: CMake Error at CMakeLists.txt:43 (add_executable): | CMake Error at CMakeLists.txt:43 (add_executable):; Makefile: CMake Error at CMakeLists.txt:43 (add_executable): | CMake Error at CMakeLists.txt:43 (add_executable):",
+ "stop": "tool_use",
+ "out_tokens": 11465,
+ "files": {
+  "CMakeLists.txt": "cmake_minimum_required(VERSION 3.15)\n\nproject(mathlib\n    VERSION 1.0.0\n    LANGUAGES C\n)\n\ninclude(GNUInstallDirs)\n\n# --- C11 standard, no compiler extensions ---\nset(CMAKE_C_STANDARD 11)\nset(CMAKE_C_STANDARD_REQUIRED ON)\nset(CMAKE_C_EXTENSIONS OFF)\n\n# Default to Release when no build type is given\nif(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)\n    set(CMAKE_BUILD_TYPE Release CACHE STRING \"Build type\" FORCE)\nendif()\n\n# --- Library target ---\nadd_library(mathlib src/mathlib.c)\ntarget_include_directories(mathlib PUBLIC\n    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>\n    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>\n)\nset_target_properties(mathlib PROPERTIES\n    VERSION   ${PROJECT_VERSION}\n    SOVERSION ${PROJECT_VERSION_MAJOR}\n    POSITION_INDEPENDENT_CODE ON\n)\n\n# --- Compiler warnings (treated as errors) ---\nif(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang|AppleClang\")\n    target_compile_options(mathlib PRIVATE -Wall -Wextra -Wpedantic -Werror)\nelseif(MSVC)\n    target_compile_options(mathlib PRIVATE /W4 /WX)\nendif()\n\n# --- Tests ---\n# Expects test/test_mathlib.c to exist alongside the project root.\nenable_testing()\n\nadd_executable(mathlib_test test/test_mathlib.c)\ntarget_link_libraries(mathlib_test PRIVATE mathlib)\n\nif(CMAKE_C_COMPILER_ID MATCHES \"GNU|Clang|AppleClang\")\n    target_compile_options(mathlib_test PRIVATE -Wall -Wextra -Wpedantic)\nelseif(MSVC)\n    target_compile_options(mathlib_test PRIVATE /W4)\nendif()\n\nadd_test(NAME mathlib_test COMMAND mathlib_test)\n\n# --- Install rules ---\ninstall(TARGETS mathlib\n    EXPORT mathlibTargets\n    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}\n    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}\n    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}\n)\n\ninstall(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})\n\ninstall(EXPORT mathlibTargets\n    FILE      mathlibTargets.cmake\n    NAMESPACE mathlib::\n    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mathlib\n)\n",
+  "Makefile": "# Makefile \u2014 thin wrapper around CMake configure / build / test / install.\n#\n# Targets:\n#   make            build (default)\n#   make configure   run cmake configure\n#   make build       compile the project\n#   make test        run the test suite via ctest\n#   make install     install to CMAKE_INSTALL_PREFIX (default /usr/local)\n#   make clean       remove the entire build directory\n#   make rebuild     clean + build\n\nBUILD_DIR  := build\nCMAKE      ?= cmake\nCTEST      ?= ctest\nINSTALL_PREFIX ?= /usr/local\n\n.PHONY: all configure build test install clean rebuild\n\nall: build\n\nconfigure:\n\t$(CMAKE) -B $(BUILD_DIR) -S . -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX)\n\nbuild: configure\n\t$(CMAKE) --build $(BUILD_DIR)\n\ntest: build\n\t$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure\n\ninstall: build\n\t$(CMAKE) --install $(BUILD_DIR)\n\nclean:\n\trm -rf $(BUILD_DIR)\n\nrebuild: clean build\n"
+ },
+ "prose": "",
+ "secs": 31.7
+}

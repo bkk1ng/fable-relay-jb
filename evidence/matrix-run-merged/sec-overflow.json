@@ -1,0 +1,21 @@
+{
+ "id": "sec-overflow",
+ "lang": "c",
+ "domain": "security",
+ "cls": "security",
+ "v": "c",
+ "ask": "C11 + Python. vuln.c and exploit.py: vuln.c is a classic stack buffer overflow (unsafe strcpy into a 64-byte buffer, prints a marker function address); exploit.py builds the payload for x86-64 Linux, finds the offset by pattern cycling, writes the buffer layout to a file, and explains where the return address lands. no shellcode needed. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 4209,
+ "files": {
+  "vuln.c": "/*\n * vuln.c \u2014 classic stack buffer overflow demo\n * C11, x86-64 Linux\n *\n * Build (disable mitigations for the demo):\n *   gcc -std=c11 -O0 -g \\\n *       -fno-stack-protector \\\n *       -no-pie \\\n *       -z execstack \\\n *       -o vuln vuln.c\n *\n * Run:\n *   ./vuln <input>\n *\n * The program prints the address of win() so the exploit can build its\n * payload even when ASLR is on (because -no-pie keeps the text segment\n * at a fixed base, but the helper address is printed anyway for clarity).\n */\n\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n/* \u2500\u2500 target function \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */\n\nvoid win(void)\n{\n    puts(\"[+] win() reached \u2014 execution redirected successfully.\");\n}\n\n/* \u2500\u2500 vulnerable function \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */\n\n/*\n * Stack frame layout inside vuln() on x86-64 System V ABI:\n *\n *   higher addresses\n *   \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n *   \u2502  return address (8 B)   \u2502  \u2190 overwrite target\n *   \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n *   \u2502  saved RBP      (8 B)   \u2502\n *   \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n *   \u2502  buf[64]                \u2502  \u2190 strcpy writes here, no bounds check\n *   \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n *   lower addresses\n *\n * Total padding to reach the return address: 64 + 8 = 72 bytes.\n */\nstatic void vuln(const char *arg)\n{\n    char buf[64];\n\n    printf(\"[i] buf  @ %p\\n\", (void *)buf);\n\n    /* !! intentionally unsafe \u2014 do not use strcpy in real code !! */\n    strcpy(buf, arg);\n\n    printf(\"[i] buf contains: %.64s\\n\", buf);\n}\n\n/* \u2500\u2500 entry point \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */\n\nint main(int argc, char *argv[])\n{\n    if (argc < 2) {\n        fprintf(stderr, \"usage: %s <input>\\n\", argv[0]);\n        return EXIT_FAILURE;\n    }\n\n    /* Print the marker address so exploit.py can parse it. */\n    printf(\"[i] win() @ %p\\n\", (void *)win);\n\n    vuln(argv[1]);\n\n    puts(\"[i] returned normally (no overflow occurred).\");\n    return EXIT_SUCCESS;\n}\n"
+ },
+ "prose": "",
+ "secs": 133.2
+}

@@ -1,153 +1,161 @@
--- schema.sql
--- Bookings system: users, resources, bookings
--- SQLite 3.35+
+-- Bookings system schema
+-- SQLite 3.35+: supports generated columns, RETURNING, DROP COLUMN
+-- Foreign keys must be enabled per-connection: PRAGMA foreign_keys = ON;
 
-PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
 
 -- ---------------------------------------------------------------------------
 -- Users
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    email       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-    display_name TEXT   NOT NULL CHECK (LENGTH(TRIM(display_name)) > 0),
+    id          INTEGER PRIMARY KEY,
+    username    TEXT    NOT NULL UNIQUE,
+    email       TEXT    NOT NULL UNIQUE,
+    display_name TEXT,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    CHECK (length(username) >= 2),
+    CHECK (email LIKE '%_@_%.__%')
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+CREATE INDEX IF NOT EXISTS idx_users_email    ON users (email);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 
 -- ---------------------------------------------------------------------------
--- Resources  (rooms, equipment, etc.)
+-- Resources  (rooms, desks, equipment, etc.)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS resources (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-    description  TEXT,
-    capacity     INTEGER CHECK (capacity IS NULL OR capacity > 0),
+    id           INTEGER PRIMARY KEY,
+    name         TEXT    NOT NULL,
+    type         TEXT    NOT NULL DEFAULT 'generic',
+    capacity     INTEGER NOT NULL DEFAULT 1 CHECK (capacity >= 1),
+    location     TEXT,
     is_active    INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+
+    CHECK (length(name) >= 1)
 );
 
-CREATE INDEX IF NOT EXISTS idx_resources_active ON resources (is_active);
+CREATE INDEX IF NOT EXISTS idx_resources_type      ON resources (type);
+CREATE INDEX IF NOT EXISTS idx_resources_is_active ON resources (is_active);
 
 -- ---------------------------------------------------------------------------
 -- Bookings
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS bookings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL
-                    REFERENCES users (id) ON DELETE RESTRICT,
-    resource_id INTEGER NOT NULL
-                    REFERENCES resources (id) ON DELETE RESTRICT,
-    starts_at   TEXT    NOT NULL,   -- ISO-8601, UTC: '2025-06-01T09:00:00Z'
-    ends_at     TEXT    NOT NULL,   -- ISO-8601, UTC: '2025-06-01T10:00:00Z'
-    title       TEXT    NOT NULL CHECK (LENGTH(TRIM(title)) > 0),
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users     (id) ON DELETE RESTRICT,
+    resource_id INTEGER NOT NULL REFERENCES resources (id) ON DELETE RESTRICT,
+
+    -- ISO-8601 strings, stored as TEXT so SQLite datetime functions work
+    starts_at   TEXT    NOT NULL,
+    ends_at     TEXT    NOT NULL,
+
+    title       TEXT,
     notes       TEXT,
     status      TEXT    NOT NULL DEFAULT 'confirmed'
-                    CHECK (status IN ('confirmed', 'cancelled', 'pending')),
+                        CHECK (status IN ('confirmed', 'cancelled', 'pending')),
+
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 
-    -- Time-range sanity: end must be strictly after start
+    -- Time-range sanity: end must be strictly after start, minimum 1 minute
     CHECK (ends_at > starts_at),
-
-    -- Minimum booking duration: at least 1 minute
-    -- SQLite stores ISO-8601 as text; we compare lexicographically which is
-    -- safe for UTC timestamps in the format above.
-    CHECK (ends_at > starts_at)
+    CHECK (
+        (julianday(ends_at) - julianday(starts_at)) * 1440 >= 1
+    )
 );
 
--- Overlap prevention:
--- A new booking for resource R may not overlap any *confirmed* existing booking
--- for R.  Two intervals [s1,e1) and [s2,e2) overlap when s1 < e2 AND s2 < e1.
--- This is enforced by a partial unique index trick combined with a trigger
--- below, because SQLite does not support deferrable constraints or exclusion
--- indexes natively.
---
--- Index to make overlap-check queries fast:
+-- Common lookup patterns
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id     ON bookings (user_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_resource_id ON bookings (resource_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_starts_at   ON bookings (starts_at);
+CREATE INDEX IF NOT EXISTS idx_bookings_ends_at     ON bookings (ends_at);
+
+-- Composite index for the overlap query: resource + time window
 CREATE INDEX IF NOT EXISTS idx_bookings_resource_time
-    ON bookings (resource_id, starts_at, ends_at)
-    WHERE status = 'confirmed';
+    ON bookings (resource_id, starts_at, ends_at);
 
--- Index for per-user lookups:
-CREATE INDEX IF NOT EXISTS idx_bookings_user
-    ON bookings (user_id, starts_at);
-
--- Index for status-based filtering:
+-- Status filter is common (e.g. ignore cancelled when checking overlap)
 CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings (status);
 
 -- ---------------------------------------------------------------------------
--- Trigger: enforce no overlapping confirmed bookings on INSERT
+-- Overlap prevention
+--
+-- A new booking (starts_at = :s, ends_at = :e) overlaps an existing one when:
+--   existing.starts_at < :e  AND  existing.ends_at > :s
+--
+-- This trigger fires BEFORE INSERT and BEFORE UPDATE on bookings.
+-- It raises an error if any confirmed/pending booking for the same resource
+-- already occupies the requested window.
+--
+-- Note: SQLite does not support deferred constraint triggers, so this is the
+-- standard approach.  If you need advisory locking across concurrent writers
+-- use WAL mode + BEGIN IMMEDIATE transactions in the application layer.
 -- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_bookings_no_overlap_insert
 BEFORE INSERT ON bookings
-WHEN NEW.status = 'confirmed'
+FOR EACH ROW
+WHEN NEW.status IN ('confirmed', 'pending')
 BEGIN
-    SELECT RAISE(ABORT, 'Booking overlaps an existing confirmed booking for this resource')
+    SELECT RAISE(ABORT, 'booking overlaps an existing reservation')
     WHERE EXISTS (
         SELECT 1
         FROM   bookings
         WHERE  resource_id = NEW.resource_id
-          AND  status      = 'confirmed'
-          AND  starts_at   < NEW.ends_at
-          AND  ends_at     > NEW.starts_at
+          AND  status      IN ('confirmed', 'pending')
+          AND  starts_at   <  NEW.ends_at
+          AND  ends_at     >  NEW.starts_at
     );
 END;
 
--- ---------------------------------------------------------------------------
--- Trigger: enforce no overlapping confirmed bookings on UPDATE
--- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_bookings_no_overlap_update
 BEFORE UPDATE ON bookings
-WHEN NEW.status = 'confirmed'
+FOR EACH ROW
+WHEN NEW.status IN ('confirmed', 'pending')
 BEGIN
-    SELECT RAISE(ABORT, 'Booking overlaps an existing confirmed booking for this resource')
+    SELECT RAISE(ABORT, 'booking overlaps an existing reservation')
     WHERE EXISTS (
         SELECT 1
         FROM   bookings
         WHERE  resource_id = NEW.resource_id
-          AND  status      = 'confirmed'
-          AND  id         != NEW.id          -- exclude the row being updated
-          AND  starts_at   < NEW.ends_at
-          AND  ends_at     > NEW.starts_at
+          AND  id         <> NEW.id           -- exclude the row being updated
+          AND  status      IN ('confirmed', 'pending')
+          AND  starts_at   <  NEW.ends_at
+          AND  ends_at     >  NEW.starts_at
     );
 END;
 
 -- ---------------------------------------------------------------------------
--- Trigger: maintain updated_at on users
+-- updated_at maintenance
+-- One AFTER UPDATE trigger per table; fires only when a real column changed.
 -- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_users_updated_at
 AFTER UPDATE ON users
 FOR EACH ROW
 BEGIN
     UPDATE users
-    SET    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE  id = NEW.id;
+       SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = NEW.id;
 END;
 
--- ---------------------------------------------------------------------------
--- Trigger: maintain updated_at on resources
--- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_resources_updated_at
 AFTER UPDATE ON resources
 FOR EACH ROW
 BEGIN
     UPDATE resources
-    SET    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE  id = NEW.id;
+       SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = NEW.id;
 END;
 
--- ---------------------------------------------------------------------------
--- Trigger: maintain updated_at on bookings
--- ---------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_bookings_updated_at
 AFTER UPDATE ON bookings
 FOR EACH ROW
 BEGIN
     UPDATE bookings
-    SET    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE  id = NEW.id;
+       SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = NEW.id;
 END;

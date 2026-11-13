@@ -1,370 +1,386 @@
-"""
-lint_report.py — static analysis report for a Python file.
+#!/usr/bin/env python3
+"""lint_report.py — static analysis for Python files.
 
-Checks:
-  - Unused imports
-  - Functions longer than N lines (default: 50)
-  - Functions with more than M arguments (default: 5)
-  - Missing docstrings (module, class, function/method)
-  - Bare except clauses
+Checks: unused imports, long functions, too many arguments,
+        missing docstrings, bare excepts.
 
-Usage:
-  python lint_report.py <file> [--max-lines N] [--max-args M] [--strict]
+Prints findings as a table sorted by severity (HIGH → MEDIUM → LOW).
+Exits 1 when --strict is set and at least one finding exists.
 """
 
 import ast
 import argparse
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
+# ── data ──────────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Severity ordering (higher index = higher severity)
-# ---------------------------------------------------------------------------
+SEVERITY_RANK: dict[str, int] = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
-SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
-
-
-# ---------------------------------------------------------------------------
-# Finding dataclass (plain tuple for stdlib-only)
-# ---------------------------------------------------------------------------
-
-def make_finding(severity: str, line: int, code: str, message: str) -> dict:
-    return {"severity": severity, "line": line, "code": code, "message": message}
+SEVERITY_COLOR: dict[str, str] = {
+    "HIGH":   "\033[1;31m",   # bold red
+    "MEDIUM": "\033[1;33m",   # bold yellow
+    "LOW":    "\033[1;34m",   # bold blue
+    "RESET":  "\033[0m",
+}
 
 
-# ---------------------------------------------------------------------------
-# Visitors
-# ---------------------------------------------------------------------------
+@dataclass(order=False)
+class Finding:
+    line: int
+    severity: str   # "HIGH" | "MEDIUM" | "LOW"
+    rule: str
+    message: str
 
-class LintVisitor(ast.NodeVisitor):
-    """Walk the AST and collect all findings."""
 
-    def __init__(self, source_lines: list[str], max_lines: int, max_args: int):
-        self.source_lines = source_lines
+# ── AST helpers ───────────────────────────────────────────────────────────────
+
+def _has_docstring(node: ast.AST) -> bool:
+    body = getattr(node, "body", [])
+    if not body:
+        return False
+    first = body[0]
+    return (
+        isinstance(first, ast.Expr)
+        and isinstance(first.value, ast.Constant)
+        and isinstance(first.value.value, str)
+    )
+
+
+def _used_names(tree: ast.Module) -> set[str]:
+    """Return every Name id that appears in a Load context outside import nodes."""
+    skip = (ast.Import, ast.ImportFrom)
+    used: set[str] = set()
+
+    # Collect names exported via __all__ = [...] so they aren't flagged unused.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "__all__":
+                    if isinstance(node.value, (ast.List, ast.Tuple)):
+                        for elt in node.value.elts:
+                            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                used.add(elt.value)
+
+    # Walk the whole tree; skip the import statement nodes themselves.
+    def _walk_non_import(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, skip):
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                used.add(child.id)
+            _walk_non_import(child)
+
+    _walk_non_import(tree)
+    return used
+
+
+def _imported_aliases(tree: ast.Module) -> list[tuple[str, int]]:
+    """Return (bound_name, lineno) for every imported symbol."""
+    result: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname if alias.asname else alias.name.split(".")[0]
+                result.append((bound, node.lineno))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound = alias.asname if alias.asname else alias.name
+                result.append((bound, node.lineno))
+    return result
+
+
+# ── visitors ──────────────────────────────────────────────────────────────────
+
+class _LintVisitor(ast.NodeVisitor):
+    """Single-pass visitor for function/class-level checks."""
+
+    def __init__(self, max_lines: int, max_args: int) -> None:
         self.max_lines = max_lines
         self.max_args = max_args
-        self.findings: list[dict] = []
+        self.findings: list[Finding] = []
+        self._class_depth = 0  # track nesting to detect methods vs. functions
 
-        # Tracks names bound by import statements
-        self._imported_names: dict[str, int] = {}  # name -> line
-        # Tracks all Name loads seen anywhere in the tree
-        self._used_names: set[str] = set()
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _add(self, severity: str, line: int, code: str, message: str) -> None:
-        self.findings.append(make_finding(severity, line, code, message))
-
-    def _function_body_lines(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
-        """Count source lines occupied by the function body."""
-        if not node.body:
-            return 0
-        first = node.body[0].lineno
-        # end_lineno is available from Python 3.8+
-        last = getattr(node, "end_lineno", node.body[-1].lineno)
-        return last - first + 1
-
-    def _arg_count(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
-        args = node.args
-        total = (
-            len(args.args)
-            + len(args.posonlyargs)
-            + len(args.kwonlyargs)
-            + (1 if args.vararg else 0)
-            + (1 if args.kwarg else 0)
-        )
-        return total
-
-    def _has_docstring(self, node: ast.AST) -> bool:
-        body = getattr(node, "body", [])
-        if not body:
-            return False
-        first = body[0]
-        return (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        )
-
-    # ------------------------------------------------------------------
-    # Import tracking
-    # ------------------------------------------------------------------
-
-    def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names:
-            bound_name = alias.asname if alias.asname else alias.name.split(".")[0]
-            self._imported_names[bound_name] = node.lineno
-        self.generic_visit(node)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        for alias in node.names:
-            if alias.name == "*":
-                # Wildcard import — we can't track usage; skip unused check
-                continue
-            bound_name = alias.asname if alias.asname else alias.name
-            self._imported_names[bound_name] = node.lineno
-        self.generic_visit(node)
-
-    def visit_Name(self, node: ast.Name) -> None:
-        if isinstance(node.ctx, ast.Load):
-            self._used_names.add(node.id)
-        self.generic_visit(node)
-
-    def visit_Attribute(self, node: ast.Attribute) -> None:
-        # Mark the root name of attribute chains as used (e.g. `os.path` marks `os`)
-        root = node
-        while isinstance(root, ast.Attribute):
-            root = root.value
-        if isinstance(root, ast.Name):
-            self._used_names.add(root.id)
-        self.generic_visit(node)
-
-    # ------------------------------------------------------------------
-    # Function / method checks
-    # ------------------------------------------------------------------
-
-    def _check_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        body_lines = self._function_body_lines(node)
-        if body_lines > self.max_lines:
-            self._add(
-                "medium",
-                node.lineno,
-                "F001",
-                f"Function '{node.name}' is {body_lines} lines long (limit: {self.max_lines})",
-            )
-
-        arg_count = self._arg_count(node)
-        if arg_count > self.max_args:
-            self._add(
-                "medium",
-                node.lineno,
-                "F002",
-                f"Function '{node.name}' has {arg_count} arguments (limit: {self.max_args})",
-            )
-
-        if not self._has_docstring(node):
-            self._add(
-                "low",
-                node.lineno,
-                "D001",
-                f"Function '{node.name}' is missing a docstring",
-            )
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._check_function(node)
-        self.generic_visit(node)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._check_function(node)
-        self.generic_visit(node)
-
-    # ------------------------------------------------------------------
-    # Class checks
-    # ------------------------------------------------------------------
+    # ── classes ──
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        if not self._has_docstring(node):
-            self._add(
-                "low",
-                node.lineno,
-                "D002",
-                f"Class '{node.name}' is missing a docstring",
-            )
+        if not _has_docstring(node):
+            self.findings.append(Finding(
+                line=node.lineno,
+                severity="LOW",
+                rule="missing-docstring",
+                message=f"class '{node.name}' has no docstring",
+            ))
+        self._class_depth += 1
+        self.generic_visit(node)
+        self._class_depth -= 1
+
+    # ── functions ──
+
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        # long-function
+        length = node.end_lineno - node.lineno + 1
+        if length > self.max_lines:
+            self.findings.append(Finding(
+                line=node.lineno,
+                severity="MEDIUM",
+                rule="long-function",
+                message=(
+                    f"'{node.name}' is {length} lines"
+                    f" (max {self.max_lines})"
+                ),
+            ))
+
+        # too-many-args
+        # For methods the first positional param (self/cls) is excluded.
+        a = node.args
+        count = (
+            len(a.posonlyargs)
+            + len(a.args)
+            + len(a.kwonlyargs)
+            + (1 if a.vararg else 0)
+            + (1 if a.kwarg else 0)
+        )
+        effective = count - 1 if (self._class_depth > 0 and count > 0) else count
+        if effective > self.max_args:
+            self.findings.append(Finding(
+                line=node.lineno,
+                severity="MEDIUM",
+                rule="too-many-args",
+                message=(
+                    f"'{node.name}' has {effective} parameter(s)"
+                    f" (max {self.max_args})"
+                ),
+            ))
+
+        # missing-docstring
+        if not _has_docstring(node):
+            self.findings.append(Finding(
+                line=node.lineno,
+                severity="LOW",
+                rule="missing-docstring",
+                message=f"'{node.name}' has no docstring",
+            ))
+
+        # Descend; a function defined inside a class method is still a function,
+        # so we don't bump _class_depth here.
         self.generic_visit(node)
 
-    # ------------------------------------------------------------------
-    # Bare except
-    # ------------------------------------------------------------------
+    visit_FunctionDef = _visit_function        # type: ignore[assignment]
+    visit_AsyncFunctionDef = _visit_function   # type: ignore[assignment]
+
+    # ── bare excepts ──
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.type is None:
-            self._add(
-                "high",
-                node.lineno,
-                "E001",
-                "Bare 'except' clause catches all exceptions including SystemExit and KeyboardInterrupt",
-            )
+            self.findings.append(Finding(
+                line=node.lineno,
+                severity="HIGH",
+                rule="bare-except",
+                message=(
+                    "bare 'except:' catches all exceptions including "
+                    "SystemExit and KeyboardInterrupt"
+                ),
+            ))
         self.generic_visit(node)
 
-    # ------------------------------------------------------------------
-    # Post-walk: unused imports
-    # ------------------------------------------------------------------
 
-    def report_unused_imports(self) -> None:
-        for name, lineno in self._imported_names.items():
-            if name not in self._used_names:
-                self._add(
-                    "medium",
-                    lineno,
-                    "I001",
-                    f"Imported name '{name}' is never used",
-                )
+# ── top-level analysis ────────────────────────────────────────────────────────
 
+def analyse(
+    source: str,
+    max_lines: int,
+    max_args: int,
+) -> list[Finding]:
+    """Parse *source* and return all findings."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return [Finding(
+            line=exc.lineno or 0,
+            severity="HIGH",
+            rule="syntax-error",
+            message=str(exc),
+        )]
 
-# ---------------------------------------------------------------------------
-# Module-level docstring check (outside the visitor)
-# ---------------------------------------------------------------------------
+    findings: list[Finding] = []
 
-def check_module_docstring(tree: ast.Module) -> list[dict]:
-    findings = []
-    body = tree.body
-    has_doc = (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    )
-    if not has_doc:
-        findings.append(
-            make_finding("low", 1, "D003", "Module is missing a top-level docstring")
-        )
-    return findings
+    # unused-import (needs full-tree name scan before visiting)
+    used = _used_names(tree)
+    for name, lineno in _imported_aliases(tree):
+        if name not in used:
+            findings.append(Finding(
+                line=lineno,
+                severity="MEDIUM",
+                rule="unused-import",
+                message=f"'{name}' is imported but never used",
+            ))
 
+    # structural checks via visitor
+    visitor = _LintVisitor(max_lines=max_lines, max_args=max_args)
+    visitor.visit(tree)
+    findings.extend(visitor.findings)
 
-# ---------------------------------------------------------------------------
-# Table rendering
-# ---------------------------------------------------------------------------
-
-_SEV_LABEL = {"high": "HIGH  ", "medium": "MEDIUM", "low": "LOW   "}
-_SEV_MARKER = {"high": "!!!", "medium": "! ", "low": "  "}
+    return sorted(findings, key=lambda f: (SEVERITY_RANK[f.severity], f.line))
 
 
-def render_table(findings: list[dict], path: str) -> str:
+# ── rendering ─────────────────────────────────────────────────────────────────
+
+def _color_supported() -> bool:
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+def _pad(text: str, width: int) -> str:
+    """Left-justify *text* in a field of *width*, truncating with … if needed."""
+    if len(text) > width:
+        return text[: width - 1] + "…"
+    return text.ljust(width)
+
+
+def print_report(
+    path: Path,
+    findings: list[Finding],
+    use_color: bool,
+) -> None:
     if not findings:
-        return f"No findings in {path}.\n"
+        print(f"{path}: no findings.\n")
+        return
 
-    # Column widths
-    col_sev = max(len("SEVERITY"), max(len(_SEV_LABEL[f["severity"]]) for f in findings))
-    col_line = max(len("LINE"), max(len(str(f["line"])) for f in findings))
-    col_code = max(len("CODE"), max(len(f["code"]) for f in findings))
-    col_msg = max(len("MESSAGE"), max(len(f["message"]) for f in findings))
+    # column widths — driven by content, with hard minimums
+    w_line = max(4, max(len(str(f.line))     for f in findings))
+    w_sev  = max(8, max(len(f.severity)      for f in findings))
+    w_rule = max(4, max(len(f.rule)          for f in findings))
+    # cap message column so the table stays readable in an 80-col terminal
+    w_msg  = min(72, max(7, max(len(f.message) for f in findings)))
 
-    sep = (
-        "+-"
-        + "-" * col_sev
-        + "-+-"
-        + "-" * col_line
-        + "-+-"
-        + "-" * col_code
-        + "-+-"
-        + "-" * col_msg
-        + "-+"
-    )
-
-    def row(sev: str, line: str, code: str, msg: str) -> str:
+    def sep() -> str:
         return (
-            "| "
-            + sev.ljust(col_sev)
-            + " | "
-            + line.rjust(col_line)
-            + " | "
-            + code.ljust(col_code)
-            + " | "
-            + msg.ljust(col_msg)
-            + " |"
+            f"+{'-' * (w_line + 2)}"
+            f"+{'-' * (w_sev  + 2)}"
+            f"+{'-' * (w_rule + 2)}"
+            f"+{'-' * (w_msg  + 2)}+"
         )
 
-    lines = [
-        f"Findings for: {path}",
-        sep,
-        row("SEVERITY", "LINE", "CODE", "MESSAGE"),
-        sep,
-    ]
+    def row(line: str, sev: str, rule: str, msg: str, color: str = "") -> str:
+        sev_padded = _pad(sev, w_sev)
+        if use_color and color:
+            sev_cell = f"{color}{sev_padded}{SEVERITY_COLOR['RESET']}"
+        else:
+            sev_cell = sev_padded
+        return (
+            f"| {_pad(line, w_line)} "
+            f"| {sev_cell} "
+            f"| {_pad(rule, w_rule)} "
+            f"| {_pad(msg,  w_msg )} |"
+        )
+
+    print(f"\n{path}")
+    print(sep())
+    print(row("LINE", "SEVERITY", "RULE", "MESSAGE"))
+    print(sep())
 
     for f in findings:
-        marker = _SEV_MARKER[f["severity"]]
-        label = _SEV_LABEL[f["severity"]]
-        lines.append(row(marker + label.strip(), str(f["line"]), f["code"], f["message"]))
+        color = SEVERITY_COLOR.get(f.severity, "") if use_color else ""
+        print(row(str(f.line), f.severity, f.rule, f.message, color))
 
-    lines.append(sep)
+    print(sep())
 
-    counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEVERITY_ORDER}
-    lines.append(
-        f"  Total: {len(findings)} finding(s) — "
-        f"high: {counts['high']}, medium: {counts['medium']}, low: {counts['low']}"
+    # summary line
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+
+    parts: list[str] = []
+    for sev in ("HIGH", "MEDIUM", "LOW"):
+        n = counts.get(sev, 0)
+        if n:
+            label = f"{n} {sev}"
+            if use_color:
+                label = f"{SEVERITY_COLOR[sev]}{label}{SEVERITY_COLOR['RESET']}"
+            parts.append(label)
+
+    total = len(findings)
+    plural = "s" if total != 1 else ""
+    print(f"  {total} finding{plural}: {', '.join(parts)}\n")
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="lint_report",
+        description="Static lint report for Python files.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    return "\n".join(lines) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-def analyze(path: Path, max_lines: int, max_args: int) -> list[dict]:
-    source = path.read_text(encoding="utf-8")
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as exc:
-        return [make_finding("high", exc.lineno or 1, "S001", f"SyntaxError: {exc.msg}")]
-
-    source_lines = source.splitlines()
-
-    visitor = LintVisitor(source_lines, max_lines, max_args)
-    visitor.visit(tree)
-    visitor.report_unused_imports()
-
-    findings = check_module_docstring(tree) + visitor.findings
-
-    # Sort: severity descending, then line ascending
-    findings.sort(key=lambda f: (-SEVERITY_ORDER[f["severity"]], f["line"]))
-    return findings
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Static lint report for a Python file.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Codes:
-  E001  Bare except clause
-  F001  Function body too long
-  F002  Too many arguments
-  D001  Function/method missing docstring
-  D002  Class missing docstring
-  D003  Module missing docstring
-  I001  Unused import
-  S001  Syntax error (file could not be parsed)
-""",
+    p.add_argument(
+        "files",
+        metavar="FILE",
+        nargs="+",
+        type=Path,
+        help="Python file(s) to analyse",
     )
-    parser.add_argument("file", type=Path, help="Python file to analyse")
-    parser.add_argument(
+    p.add_argument(
         "--max-lines",
+        metavar="N",
         type=int,
         default=50,
-        metavar="N",
-        help="Maximum allowed lines in a function body (default: 50)",
+        help="flag functions longer than N lines",
     )
-    parser.add_argument(
+    p.add_argument(
         "--max-args",
+        metavar="M",
         type=int,
         default=5,
-        metavar="M",
-        help="Maximum allowed function arguments (default: 5)",
+        help="flag functions with more than M arguments (self/cls excluded)",
     )
-    parser.add_argument(
+    p.add_argument(
         "--strict",
         action="store_true",
-        help="Exit with code 1 if any finding is present",
+        help="exit 1 if any finding is reported",
     )
-    args = parser.parse_args()
+    p.add_argument(
+        "--no-color",
+        action="store_true",
+        help="disable ANSI colour output",
+    )
+    return p
 
-    if not args.file.exists():
-        print(f"error: file not found: {args.file}", file=sys.stderr)
-        sys.exit(2)
 
-    if not args.file.is_file():
-        print(f"error: not a file: {args.file}", file=sys.stderr)
-        sys.exit(2)
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    use_color = not args.no_color and _color_supported()
 
-    findings = analyze(args.file, args.max_lines, args.max_args)
-    print(render_table(findings, str(args.file)), end="")
+    any_findings = False
 
-    if args.strict and findings:
-        sys.exit(1)
+    for path in args.files:
+        if not path.exists():
+            print(f"error: '{path}' does not exist", file=sys.stderr)
+            return 2
+        if not path.is_file():
+            print(f"error: '{path}' is not a file", file=sys.stderr)
+            return 2
+
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+        findings = analyse(source, args.max_lines, args.max_args)
+        print_report(path, findings, use_color)
+
+        if findings:
+            any_findings = True
+
+    if args.strict and any_findings:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

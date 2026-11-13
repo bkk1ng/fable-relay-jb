@@ -1,0 +1,20 @@
+{
+ "id": "parse-expr",
+ "lang": "python",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "python",
+ "ask": "Python 3.12, stdlib only. expr.py: tokenizer plus recursive-descent evaluator for arithmetic with precedence, parentheses, unary minus, variables, function calls (sin/cos/sqrt/min/max with arity checks), and clear error messages with positions. include a REPL under __main__ and doctest-style self-checks. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "relay5xx",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 682.2
+}

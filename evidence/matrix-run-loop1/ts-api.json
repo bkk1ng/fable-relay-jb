@@ -1,0 +1,20 @@
+{
+ "id": "ts-api",
+ "lang": "ts",
+ "domain": "web",
+ "cls": "code",
+ "v": "ts",
+ "ask": "TypeScript, Node 22, no express. server.ts: typed mini framework \u2014 router with method+path patterns, param extraction, JSON body parsing with size limit, schema validation helpers, error middleware, 404 and 500 handling, in-memory store for a todo resource with CRUD routes, and graceful shutdown. compile clean under strict. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "relay5xx",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 423.4
+}

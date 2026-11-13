@@ -1,12 +1,22 @@
-/* supervisor.c — C11, Linux
+/*
+ * supervisor.c — C11/Linux process supervisor
  *
- * Starts N children from child_configs[], reaps via SIGCHLD self-pipe,
- * restarts crashed children with exponential backoff and a crash-loop
- * cutoff, forwards SIGTERM/SIGINT to all children, and logs exit status
- * and terminating signal for every child that dies.
+ * Reads a config file (one command per line), spawns each as a child process,
+ * reaps children via SIGCHLD delivered through a self-pipe, restarts crashed
+ * children with exponential backoff, enforces a crash-loop cutoff, forwards
+ * SIGTERM to all children on shutdown, and logs child exit status/signal to
+ * stderr with timestamps.
  *
- * Build:  gcc -std=c11 -Wall -Wextra -o supervisor supervisor.c
- * Run:    ./supervisor
+ * Usage:
+ *   supervisor <config-file>
+ *
+ * Config file format:
+ *   # lines starting with # are comments
+ *   /usr/bin/myservice --flag value
+ *   ./worker --port 8080 --threads 4
+ *
+ * Build:
+ *   cc -std=c11 -Wall -Wextra -Wpedantic -o supervisor supervisor.c
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -14,343 +24,486 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
-/* Config — edit child_configs[] to taste                              */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------------------
+ * Tunables
+ * ---------------------------------------------------------------------- */
 
-#define MAX_CHILDREN  64
-#define MAX_ARGS      32
+#define MAX_CHILDREN       64
+#define MAX_ARGS           63     /* per child; argv[MAX_ARGS] is always NULL */
+#define BACKOFF_INIT_SECS   1u
+#define BACKOFF_MAX_SECS   64u
+#define CRASH_LOOP_MAX      5     /* give up after this many crashes in window */
+#define CRASH_WINDOW_SECS  60     /* rolling window for crash counting (seconds) */
+#define CFG_LINE_MAX      1024
 
-/* Each row is a NULL-terminated argv for one child process. */
-static char *child_configs[][MAX_ARGS + 1] = {
-    { "/bin/sleep", "5",  NULL },
-    { "/bin/sleep", "10", NULL },
-};
-#define N_CHILDREN ((int)(sizeof child_configs / sizeof child_configs[0]))
-
-/* Restart policy */
-#define MAX_RESTARTS  5   /* give up after this many consecutive crashes  */
-#define BACKOFF_BASE  1   /* initial backoff seconds                       */
-#define BACKOFF_CAP   60  /* maximum backoff seconds                       */
-#define GOOD_RUN_SEC  10  /* uptime that resets the consecutive crash count*/
-
-/* ------------------------------------------------------------------ */
-/* Child state                                                          */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------------------
+ * Child descriptor
+ * ---------------------------------------------------------------------- */
 
 typedef struct {
-    char  *argv[MAX_ARGS + 1];  /* null-terminated argv                   */
-    pid_t  pid;                 /* 0 = not running                        */
-    int    crashes;             /* consecutive crash count                 */
-    int    backoff;             /* delay before next restart (seconds)    */
-    time_t started_at;          /* wall clock when last exec'd             */
-    time_t restart_at;          /* 0 = not scheduled; else epoch of restart*/
-    int    abandoned;           /* crash-loop cutoff reached              */
-} Child;
+    char    *argv[MAX_ARGS + 1]; /* null-terminated argv for execvp */
+    int      argc;
+    pid_t    pid;                /* 0 = not currently running */
+    int      dead;               /* 1 = crash-loop cutoff reached; no more restarts */
+    int      crashes;            /* crash count in current window */
+    time_t   window_start;       /* wall time of first crash in this window */
+    unsigned backoff;            /* seconds to wait before next restart */
+    time_t   restart_at;         /* wall time for next restart; 0 = start immediately */
+    time_t   started_at;         /* wall time child was last spawned (for window reset) */
+} child_t;
 
-static Child children[MAX_CHILDREN];
-static int   n_children;
+/* -------------------------------------------------------------------------
+ * Globals
+ * ---------------------------------------------------------------------- */
 
-/* ------------------------------------------------------------------ */
-/* Self-pipe and signal flags                                           */
-/* ------------------------------------------------------------------ */
+static child_t              g_children[MAX_CHILDREN];
+static int                  g_nchildren = 0;
+static int                  g_pipe[2]   = {-1, -1}; /* self-pipe [read, write] */
+static volatile sig_atomic_t g_term     = 0;
 
-static int pipe_fd[2];
-static volatile sig_atomic_t terminating;
+/* -------------------------------------------------------------------------
+ * Helpers
+ * ---------------------------------------------------------------------- */
+
+/* Log with a wall-clock timestamp prefix. Not async-signal-safe; call only
+ * from the main loop, never from signal handlers. */
+static void log_msg(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+
+static void log_msg(const char *fmt, ...)
+{
+    char   tbuf[32];
+    time_t now = time(NULL);
+    struct tm tm_now;
+
+    if (localtime_r(&now, &tm_now) != NULL)
+        strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%S", &tm_now);
+    else
+        snprintf(tbuf, sizeof tbuf, "?");
+
+    fprintf(stderr, "[%s] supervisor: ", tbuf);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+
+    fputc('\n', stderr);
+}
+
+/* Write one byte to the self-pipe; silently ignores EAGAIN (pipe full). */
+static void pipe_signal(void)
+{
+    char    b = 0;
+    ssize_t r;
+    do {
+        r = write(g_pipe[1], &b, 1);
+    } while (r < 0 && errno == EINTR);
+    /* EAGAIN is intentional: pipe full means the main loop will wake anyway. */
+}
+
+/* Drain every pending byte from the read end of the self-pipe. */
+static void pipe_drain(void)
+{
+    char    buf[64];
+    ssize_t r;
+    while ((r = read(g_pipe[0], buf, sizeof buf)) > 0)
+        ;
+    /* EAGAIN / EWOULDBLOCK means we're done; any other error is ignored. */
+}
+
+/* -------------------------------------------------------------------------
+ * Signal handlers (async-signal-safe only)
+ * ---------------------------------------------------------------------- */
 
 static void sigchld_handler(int sig)
 {
     (void)sig;
-    /* One byte wakes the main loop; O_NONBLOCK prevents any blocking. */
-    char b = 'c';
-    while (write(pipe_fd[1], &b, 1) == -1 && errno == EINTR)
-        ;
+    pipe_signal();
 }
 
 static void sigterm_handler(int sig)
 {
     (void)sig;
-    terminating = 1;
-    char b = 't';
-    while (write(pipe_fd[1], &b, 1) == -1 && errno == EINTR)
-        ;
+    g_term = 1;
+    pipe_signal();
 }
 
-/* ------------------------------------------------------------------ */
-/* Logging                                                              */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------------------
+ * Child lifecycle
+ * ---------------------------------------------------------------------- */
 
-/* All logging goes to stderr.  Called only from the main loop, never
-   from a signal handler, so fprintf is fine. */
-static void log_msg(const char *msg)
+/* Spawn child i.  Resets the child's pid and started_at on success. */
+static void spawn(int i)
 {
-    fprintf(stderr, "%s\n", msg);
-}
+    child_t *c   = &g_children[i];
+    pid_t    pid = fork();
 
-static void log_child_exit(int idx, pid_t pid, int status)
-{
-    char buf[256];
-    if (WIFEXITED(status)) {
-        snprintf(buf, sizeof buf,
-                 "[supervisor] child[%d] pid=%d exited status=%d",
-                 idx, (int)pid, WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        snprintf(buf, sizeof buf,
-                 "[supervisor] child[%d] pid=%d killed by signal %d (%s)%s",
-                 idx, (int)pid, WTERMSIG(status),
-                 strsignal(WTERMSIG(status)),
-                 WCOREDUMP(status) ? " (core dumped)" : "");
-    } else {
-        snprintf(buf, sizeof buf,
-                 "[supervisor] child[%d] pid=%d stopped/continued status=0x%x",
-                 idx, (int)pid, (unsigned)status);
-    }
-    log_msg(buf);
-}
-
-/* ------------------------------------------------------------------ */
-/* Child management                                                     */
-/* ------------------------------------------------------------------ */
-
-static void start_child(int idx)
-{
-    Child *c = &children[idx];
-    if (c->abandoned) return;
-
-    pid_t pid = fork();
     if (pid < 0) {
-        perror("[supervisor] fork");
+        log_msg("fork failed for child[%d] (%s): %s", i, c->argv[0], strerror(errno));
+        /* Back off and try again later. */
+        c->restart_at = time(NULL) + (time_t)c->backoff;
         return;
     }
+
     if (pid == 0) {
-        /* Restore default dispositions in the child. */
+        /* Child: restore default signal dispositions, then exec. */
         signal(SIGCHLD, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
-        signal(SIGINT,  SIG_DFL);
-        close(pipe_fd[0]);
-        close(pipe_fd[1]);
+        /* Close the self-pipe — it has O_CLOEXEC but be explicit. */
+        close(g_pipe[0]);
+        close(g_pipe[1]);
+
         execvp(c->argv[0], c->argv);
-        perror(c->argv[0]);
+        /* execvp only returns on error. */
+        fprintf(stderr, "supervisor: execvp %s: %s\n", c->argv[0], strerror(errno));
         _exit(127);
     }
 
+    /* Parent */
     c->pid        = pid;
     c->started_at = time(NULL);
     c->restart_at = 0;
-
-    char buf[256];
-    snprintf(buf, sizeof buf,
-             "[supervisor] child[%d] pid=%d started: %s",
-             idx, (int)pid, c->argv[0]);
-    log_msg(buf);
+    log_msg("child[%d] pid=%d started: %s", i, (int)pid, c->argv[0]);
 }
 
-/* Returns 1 if status represents a crash (non-zero exit or signal). */
-static int is_crash(int status)
+/* Called when a child with index i has exited with waitpid status. */
+static void handle_exit(int i, pid_t pid, int status)
 {
-    if (WIFSIGNALED(status)) return 1;
-    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) return 1;
-    return 0;
-}
+    child_t *c   = &g_children[i];
+    time_t   now = time(NULL);
 
-static void schedule_restart(int idx)
-{
-    Child *c = &children[idx];
-    char  buf[256];
+    /* Log exit reason. */
+    if (WIFEXITED(status)) {
+        log_msg("child[%d] pid=%d (%s) exited with status %d",
+                i, (int)pid, c->argv[0], WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        log_msg("child[%d] pid=%d (%s) killed by signal %d (%s)",
+                i, (int)pid, c->argv[0], WTERMSIG(status), strsignal(WTERMSIG(status)));
+    } else {
+        log_msg("child[%d] pid=%d (%s) exited (unknown status 0x%x)",
+                i, (int)pid, c->argv[0], (unsigned)status);
+    }
 
-    /* A run long enough to be considered healthy resets the crash counter. */
-    time_t ran_for = time(NULL) - c->started_at;
-    if (ran_for >= GOOD_RUN_SEC) {
+    c->pid = 0;
+
+    /* During shutdown, do not schedule restarts. */
+    if (g_term)
+        return;
+
+    /* Clean exit (status 0) is treated as intentional; do not restart. */
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return;
+
+    /* If the child ran long enough, reset its crash window and backoff so a
+     * one-off crash does not permanently burn through the quota. */
+    if (c->crashes > 0 && (now - c->window_start) >= CRASH_WINDOW_SECS) {
         c->crashes = 0;
-        c->backoff  = BACKOFF_BASE;
+        c->backoff  = BACKOFF_INIT_SECS;
+    }
+
+    /* Open a new window on first crash. */
+    if (c->crashes == 0) {
+        c->window_start = now;
+        c->backoff      = BACKOFF_INIT_SECS;
     }
 
     c->crashes++;
-    if (c->crashes > MAX_RESTARTS) {
-        c->abandoned = 1;
-        snprintf(buf, sizeof buf,
-                 "[supervisor] child[%d] abandoned after %d consecutive crashes",
-                 idx, MAX_RESTARTS);
-        log_msg(buf);
+
+    if (c->crashes >= CRASH_LOOP_MAX) {
+        log_msg("child[%d] (%s) hit crash-loop cutoff (%d crashes in %lds), disabled",
+                i, c->argv[0], c->crashes, (long)(now - c->window_start));
+        c->dead = 1;
         return;
     }
 
-    int delay  = c->backoff;
-    c->backoff = (c->backoff * 2 <= BACKOFF_CAP) ? c->backoff * 2 : BACKOFF_CAP;
+    c->restart_at = now + (time_t)c->backoff;
+    log_msg("child[%d] (%s) scheduled restart in %us (crash #%d of %d)",
+            i, c->argv[0], c->backoff, c->crashes, CRASH_LOOP_MAX - 1);
 
-    c->restart_at = time(NULL) + delay;
-    snprintf(buf, sizeof buf,
-             "[supervisor] child[%d] will restart in %ds (crash #%d/%d)",
-             idx, delay, c->crashes, MAX_RESTARTS);
-    log_msg(buf);
+    /* Double backoff, capped at maximum. */
+    if (c->backoff < BACKOFF_MAX_SECS / 2)
+        c->backoff *= 2;
+    else
+        c->backoff = BACKOFF_MAX_SECS;
 }
 
-/* Non-blocking pass: reap every dead child. */
-static void reap_children(void)
+/* Reap all available children without blocking. */
+static void reap_all(void)
 {
-    int   status;
-    pid_t pid;
+    int    status;
+    pid_t  pid;
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         int found = 0;
-        for (int i = 0; i < n_children; i++) {
-            if (children[i].pid != pid) continue;
-            log_child_exit(i, pid, status);
-            children[i].pid = 0;
-            if (!terminating && is_crash(status))
-                schedule_restart(i);
-            found = 1;
-            break;
+        for (int i = 0; i < g_nchildren; i++) {
+            if (g_children[i].pid == pid) {
+                handle_exit(i, pid, status);
+                found = 1;
+                break;
+            }
         }
         if (!found) {
-            char buf[128];
-            snprintf(buf, sizeof buf,
-                     "[supervisor] reaped unknown pid=%d status=0x%x",
-                     (int)pid, (unsigned)status);
-            log_msg(buf);
+            /* Shouldn't happen under normal operation. */
+            log_msg("reaped unknown pid=%d status=0x%x", (int)pid, (unsigned)status);
         }
     }
 }
 
-/* Send sig to every live child. */
-static void forward_signal(int sig)
+/* Send SIGTERM to every running child. */
+static void forward_sigterm(void)
 {
-    char buf[128];
-    snprintf(buf, sizeof buf,
-             "[supervisor] forwarding signal %d (%s) to all children",
-             sig, strsignal(sig));
-    log_msg(buf);
-    for (int i = 0; i < n_children; i++) {
-        if (children[i].pid > 0)
-            kill(children[i].pid, sig);
+    for (int i = 0; i < g_nchildren; i++) {
+        if (g_children[i].pid > 0) {
+            if (kill(g_children[i].pid, SIGTERM) < 0 && errno != ESRCH)
+                log_msg("kill(%d, SIGTERM): %s", (int)g_children[i].pid, strerror(errno));
+        }
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                                 */
-/* ------------------------------------------------------------------ */
-
-int main(void)
+/* Return 1 if every child is either dead/disabled or not running. */
+static int all_stopped(void)
 {
-    /* --- self-pipe ------------------------------------------------- */
-    if (pipe(pipe_fd) == -1) { perror("pipe"); return 1; }
+    for (int i = 0; i < g_nchildren; i++) {
+        if (g_children[i].pid > 0)
+            return 0;
+    }
+    return 1;
+}
 
-    /* Both ends non-blocking: writes from the handler never stall,
-       and draining reads in the loop return EAGAIN when empty. */
+/* -------------------------------------------------------------------------
+ * Config parsing
+ * ---------------------------------------------------------------------- */
+
+/* Split a mutable line into tokens.  Tokens are stored as pointers into
+ * heap-allocated copies (strdup) so the line buffer can be reused. */
+static int parse_line(char *line, child_t *c)
+{
+    /* Strip trailing newline / carriage return. */
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+
+    /* Skip blank lines and comments. */
+    char *p = line;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p == '\0' || *p == '#')
+        return 0;
+
+    memset(c, 0, sizeof *c);
+    c->backoff = BACKOFF_INIT_SECS;
+
+    char *token;
+    char *rest = line;
+    while ((token = strtok_r(rest, " \t", &rest)) != NULL) {
+        if (c->argc >= MAX_ARGS) {
+            fprintf(stderr, "supervisor: too many arguments (max %d), ignoring extras\n",
+                    MAX_ARGS);
+            break;
+        }
+        c->argv[c->argc] = strdup(token);
+        if (!c->argv[c->argc]) {
+            perror("strdup");
+            /* Free what we've already allocated. */
+            for (int j = 0; j < c->argc; j++) free(c->argv[j]);
+            return -1;
+        }
+        c->argc++;
+    }
+    c->argv[c->argc] = NULL;
+    return c->argc > 0 ? 1 : 0;
+}
+
+static int load_config(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "supervisor: open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    char line[CFG_LINE_MAX];
+    int  lineno = 0;
+
+    while (fgets(line, sizeof line, f)) {
+        lineno++;
+        if (g_nchildren >= MAX_CHILDREN) {
+            fprintf(stderr, "supervisor: config: too many children (max %d)\n", MAX_CHILDREN);
+            break;
+        }
+        int r = parse_line(line, &g_children[g_nchildren]);
+        if (r < 0) {
+            fclose(f);
+            return -1;
+        }
+        if (r > 0)
+            g_nchildren++;
+    }
+
+    if (ferror(f)) {
+        fprintf(stderr, "supervisor: read %s: %s\n", path, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+
+    fclose(f);
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Main loop
+ * ---------------------------------------------------------------------- */
+
+int main(int argc, char *argv[])
+{
+    if (argc != 2) {
+        fprintf(stderr, "usage: supervisor <config-file>\n");
+        return 1;
+    }
+
+    /* Load config before we do anything irreversible. */
+    if (load_config(argv[1]) < 0)
+        return 1;
+
+    if (g_nchildren == 0) {
+        fprintf(stderr, "supervisor: no children defined in %s\n", argv[1]);
+        return 1;
+    }
+
+    /* Create self-pipe with O_NONBLOCK + O_CLOEXEC on both ends. */
+    if (pipe(g_pipe) < 0) {
+        perror("supervisor: pipe");
+        return 1;
+    }
     for (int i = 0; i < 2; i++) {
-        int fl = fcntl(pipe_fd[i], F_GETFL);
-        if (fl < 0 || fcntl(pipe_fd[i], F_SETFL, fl | O_NONBLOCK) < 0) {
-            perror("fcntl O_NONBLOCK");
+        int flags = fcntl(g_pipe[i], F_GETFL);
+        if (flags < 0 || fcntl(g_pipe[i], F_SETFL, flags | O_NONBLOCK) < 0) {
+            perror("supervisor: fcntl O_NONBLOCK");
+            return 1;
+        }
+        flags = fcntl(g_pipe[i], F_GETFD);
+        if (flags < 0 || fcntl(g_pipe[i], F_SETFD, flags | FD_CLOEXEC) < 0) {
+            perror("supervisor: fcntl FD_CLOEXEC");
             return 1;
         }
     }
 
-    /* --- signal handlers ------------------------------------------- */
+    /* Install signal handlers. */
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sigemptyset(&sa.sa_mask);
     sa.sa_flags   = SA_RESTART;
     sa.sa_handler = sigchld_handler;
-    if (sigaction(SIGCHLD, &sa, NULL) < 0) { perror("sigaction SIGCHLD"); return 1; }
-
+    if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+        perror("supervisor: sigaction SIGCHLD");
+        return 1;
+    }
     sa.sa_handler = sigterm_handler;
-    if (sigaction(SIGTERM, &sa, NULL) < 0) { perror("sigaction SIGTERM"); return 1; }
-    if (sigaction(SIGINT,  &sa, NULL) < 0) { perror("sigaction SIGINT");  return 1; }
-
-    /* --- build child table ----------------------------------------- */
-    n_children = N_CHILDREN < MAX_CHILDREN ? N_CHILDREN : MAX_CHILDREN;
-    for (int i = 0; i < n_children; i++) {
-        Child *c = &children[i];
-        memset(c, 0, sizeof *c);
-        for (int j = 0; j <= MAX_ARGS; j++) {
-            c->argv[j] = child_configs[i][j];
-            if (!c->argv[j]) break;
-        }
-        c->backoff = BACKOFF_BASE;
+    if (sigaction(SIGTERM, &sa, NULL) < 0) {
+        perror("supervisor: sigaction SIGTERM");
+        return 1;
+    }
+    /* Also catch SIGINT for interactive use. */
+    if (sigaction(SIGINT, &sa, NULL) < 0) {
+        perror("supervisor: sigaction SIGINT");
+        return 1;
     }
 
-    /* --- initial launch -------------------------------------------- */
-    log_msg("[supervisor] starting");
-    for (int i = 0; i < n_children; i++)
-        start_child(i);
+    log_msg("starting, managing %d child(ren)", g_nchildren);
 
-    /* --- event loop ------------------------------------------------- */
-    for (;;) {
-        /*
-         * Compute the timeout: the nearest scheduled restart, if any.
-         * With no pending restarts we block indefinitely on the pipe.
-         */
-        struct timeval  tv;
-        struct timeval *tvp = NULL;
+    /* Initial spawn of all children. */
+    for (int i = 0; i < g_nchildren; i++)
+        spawn(i);
+
+    /* ------------------------------------------------------------------ *
+     * Main select loop                                                     *
+     * ------------------------------------------------------------------ */
+    while (1) {
         time_t now = time(NULL);
 
-        for (int i = 0; i < n_children; i++) {
-            if (!children[i].restart_at) continue;
-            time_t diff = children[i].restart_at - now;
-            if (diff < 0) diff = 0;
-            if (tvp == NULL || diff < (time_t)tv.tv_sec) {
-                tv.tv_sec  = diff;
-                tv.tv_usec = 0;
-                tvp = &tv;
+        /* If we're shutting down, forward SIGTERM and wait for children. */
+        if (g_term) {
+            static int forwarded = 0;
+            if (!forwarded) {
+                log_msg("SIGTERM received, forwarding to %d child(ren)", g_nchildren);
+                forward_sigterm();
+                forwarded = 1;
             }
+            reap_all();
+            if (all_stopped()) {
+                log_msg("all children stopped, exiting");
+                break;
+            }
+        } else {
+            /* Spawn any child whose restart timer has elapsed. */
+            for (int i = 0; i < g_nchildren; i++) {
+                child_t *c = &g_children[i];
+                if (c->pid == 0 && !c->dead && c->restart_at <= now)
+                    spawn(i);
+            }
+        }
+
+        /* Compute select(2) timeout: minimum time until the next scheduled
+         * restart, or NULL (block indefinitely) if none are pending. */
+        struct timeval  tv_buf;
+        struct timeval *tv     = NULL;
+        time_t          min_at = 0;
+
+        if (!g_term) {
+            for (int i = 0; i < g_nchildren; i++) {
+                child_t *c = &g_children[i];
+                if (c->pid == 0 && !c->dead && c->restart_at > 0) {
+                    if (min_at == 0 || c->restart_at < min_at)
+                        min_at = c->restart_at;
+                }
+            }
+        } else {
+            /* Poll rapidly while draining exiting children. */
+            min_at = now + 1;
+        }
+
+        if (min_at != 0) {
+            time_t delta = min_at - now;
+            if (delta < 0) delta = 0;
+            tv_buf.tv_sec  = delta;
+            tv_buf.tv_usec = 0;
+            tv = &tv_buf;
         }
 
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(pipe_fd[0], &rfds);
+        FD_SET(g_pipe[0], &rfds);
 
-        int r = select(pipe_fd[0] + 1, &rfds, NULL, NULL, tvp);
-        if (r < 0 && errno != EINTR) { perror("select"); break; }
-
-        /* Drain the pipe fully before processing — a burst of SIGCHLD
-           signals may have produced multiple bytes. */
-        {
-            char drain[64];
-            while (read(pipe_fd[0], drain, sizeof drain) > 0)
-                ;
+        int r = select(g_pipe[0] + 1, &rfds, NULL, NULL, tv);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue; /* signal interrupted select; loop and re-evaluate */
+            perror("supervisor: select");
+            break;
         }
 
-        /* Handle shutdown request (SIGTERM or SIGINT). */
-        if (terminating) {
-            forward_signal(SIGTERM);
-            /* Blocking reap; log every exit so the caller has a record. */
-            int   wstatus;
-            pid_t wpid;
-            while ((wpid = waitpid(-1, &wstatus, 0)) > 0) {
-                for (int i = 0; i < n_children; i++) {
-                    if (children[i].pid == wpid) {
-                        log_child_exit(i, wpid, wstatus);
-                        children[i].pid = 0;
-                        break;
-                    }
-                }
-            }
-            log_msg("[supervisor] exiting");
-            return 0;
+        if (r > 0 && FD_ISSET(g_pipe[0], &rfds)) {
+            pipe_drain();
+            reap_all();
         }
-
-        /* Reap any children that have exited. */
-        reap_children();
-
-        /* Fire scheduled restarts whose deadline has passed. */
-        now = time(NULL);
-        for (int i = 0; i < n_children; i++) {
-            Child *c = &children[i];
-            if (c->pid == 0 && c->restart_at > 0 &&
-                now >= c->restart_at && !c->abandoned)
-            {
-                start_child(i);
-            }
-        }
+        /* If r == 0 (timeout), the loop will re-evaluate and spawn. */
     }
 
-    return 1;
+    /* Free config memory. */
+    for (int i = 0; i < g_nchildren; i++)
+        for (int j = 0; j < g_children[i].argc; j++)
+            free(g_children[i].argv[j]);
+
+    return 0;
 }

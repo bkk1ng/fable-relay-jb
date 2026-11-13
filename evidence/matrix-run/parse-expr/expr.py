@@ -1,290 +1,326 @@
 """
-expr.py — arithmetic expression tokenizer and evaluator (Python 3.12, stdlib only)
+expr.py — arithmetic expression evaluator (Python 3.12, stdlib only)
 
 Supports:
   - Integer and float literals
-  - Operators: + - * / // % ** with correct precedence
+  - Binary operators: +  -  *  /  //  %  **  (with standard precedence)
   - Unary minus
   - Parentheses
-  - Variables (assigned in the environment dict)
-  - Function calls: sin, cos, sqrt, min, max (with arity checks)
-  - Clear error messages that include the position in the input string
+  - Variables  (passed as a dict to evaluate())
+  - Function calls: sin, cos, sqrt, min, max  (with arity checks)
 
-Usage:
-  result = evaluate("2 + 3 * sin(0)")
-  result = evaluate("x ** 2 + y", env={"x": 3, "y": 4})
+Public API
+----------
+tokenize(text: str) -> list[Token]
+parse(text: str) -> ASTNode
+evaluate(text: str, variables: dict | None = None) -> float
 
-Doctests:
-  >>> evaluate("1 + 2")
-  3
-  >>> evaluate("2 ** 10")
-  1024
-  >>> evaluate("10 // 3")
-  3
-  >>> evaluate("10 % 3")
-  1
-  >>> evaluate("-(-5)")
-  5
-  >>> evaluate("2 + 3 * 4")
-  14
-  >>> evaluate("(2 + 3) * 4")
-  20
-  >>> evaluate("min(3, 1, 2)")
-  1
-  >>> evaluate("max(10, 20)")
-  20
-  >>> import math
-  >>> abs(evaluate("sin(0)") - 0.0) < 1e-9
-  True
-  >>> abs(evaluate("cos(0)") - 1.0) < 1e-9
-  True
-  >>> abs(evaluate("sqrt(4)") - 2.0) < 1e-9
-  True
-  >>> evaluate("x + 1", env={"x": 41})
-  42
-  >>> evaluate("1 / 0")
-  Traceback (most recent call last):
-      ...
-  expr.EvalError: division by zero at position 2
-  >>> evaluate("foo(1)")
-  Traceback (most recent call last):
-      ...
-  expr.EvalError: unknown function 'foo' at position 0
-  >>> evaluate("sin(1, 2)")
-  Traceback (most recent call last):
-      ...
-  expr.EvalError: 'sin' expects 1 argument, got 2 at position 0
-  >>> evaluate("unknownVar")
-  Traceback (most recent call last):
-      ...
-  expr.EvalError: undefined variable 'unknownVar' at position 0
-  >>> evaluate("1 +")
-  Traceback (most recent call last):
-      ...
-  expr.ParseError: unexpected end of input at position 3
-  >>> evaluate("(1 + 2")
-  Traceback (most recent call last):
-      ...
-  expr.ParseError: expected ')' at position 6
+REPL
+----
+Run  `python expr.py`  for an interactive prompt.
+
+Doctests
+--------
+Run  `python -m doctest expr.py -v`  to execute the self-checks embedded below.
+
+>>> evaluate("1 + 2")
+3.0
+>>> evaluate("2 ** 10")
+1024.0
+>>> evaluate("-(3 + 4) * 2")
+-14.0
+>>> evaluate("10 // 3")
+3.0
+>>> evaluate("10 % 3")
+1.0
+>>> evaluate("sin(0)")
+0.0
+>>> evaluate("cos(0)")
+1.0
+>>> round(evaluate("sqrt(2)"), 10)
+1.4142135624
+>>> evaluate("min(3, 1, 2)")
+1.0
+>>> evaluate("max(3, 1, 2)")
+3.0
+>>> evaluate("x * 2 + 1", {"x": 5})
+11.0
+>>> evaluate("pi", {"pi": 3.141592653589793})
+3.141592653589793
 """
+
+from __future__ import annotations
 
 import math
 import re
-from typing import NamedTuple
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-class ExprError(Exception):
-    """Base class for all errors raised by this module."""
-
-class ParseError(ExprError):
-    """Raised when the input cannot be tokenized or parsed."""
-
-class EvalError(ExprError):
-    """Raised when a valid expression cannot be evaluated (e.g. div-by-zero)."""
-
+import sys
+from dataclasses import dataclass, field
+from typing import Any
 
 # ---------------------------------------------------------------------------
-# Tokens
+# Token types
 # ---------------------------------------------------------------------------
 
-class TokenKind:
-    NUMBER  = "NUMBER"
-    NAME    = "NAME"
-    PLUS    = "+"
-    MINUS   = "-"
-    STAR    = "*"
-    SLASH   = "/"
-    DSLASH  = "//"
-    PERCENT = "%"
-    DSTAR   = "**"
-    LPAREN  = "("
-    RPAREN  = ")"
-    COMMA   = ","
-    EOF     = "EOF"
+TK_NUMBER = "NUMBER"
+TK_NAME   = "NAME"
+TK_OP     = "OP"
+TK_LPAREN = "LPAREN"
+TK_RPAREN = "RPAREN"
+TK_COMMA  = "COMMA"
+TK_EOF    = "EOF"
 
 
-class Token(NamedTuple):
+@dataclass
+class Token:
     kind: str
-    value: str | float | int
-    pos: int  # byte offset in the original source string
+    value: str
+    pos: int   # 0-based character offset in the source string
+
+    def __repr__(self) -> str:
+        return f"Token({self.kind}, {self.value!r}, pos={self.pos})"
 
 
-# Token patterns ordered so longer operators match before shorter ones.
+# ---------------------------------------------------------------------------
+# Tokenizer
+# ---------------------------------------------------------------------------
+
 _TOKEN_RE = re.compile(
     r"""
-    (?P<NUMBER>  \d+(?:\.\d*)?(?:[eE][+-]?\d+)? )   # numeric literal
-  | (?P<NAME>    [A-Za-z_][A-Za-z_0-9]* )            # identifier or keyword
-  | (?P<DSTAR>   \*\* )                              # ** before *
-  | (?P<DSLASH>  // )                                # // before /
-  | (?P<PLUS>    \+ )
-  | (?P<MINUS>   - )
-  | (?P<STAR>    \* )
-  | (?P<SLASH>   / )
-  | (?P<PERCENT> % )
-  | (?P<LPAREN>  \( )
-  | (?P<RPAREN>  \) )
-  | (?P<COMMA>   , )
-  | (?P<SKIP>    [ \t\n\r]+ )                        # whitespace — ignored
-  | (?P<MISMATCH> . )                                # anything else → error
+    (?P<NUMBER> \d+(?:\.\d*)?(?:[eE][+-]?\d+)? )   # int / float
+  | (?P<NAME>   [A-Za-z_][A-Za-z_0-9]* )            # identifier
+  | (?P<OP>     \*\*|//|[+\-*/%] )                  # operators (** and // first)
+  | (?P<LPAREN> \( )
+  | (?P<RPAREN> \) )
+  | (?P<COMMA>  , )
+  | (?P<SKIP>   [ \t\r\n]+ )                        # whitespace — ignored
+  | (?P<MISMATCH> . )                               # anything else → error
     """,
     re.VERBOSE,
 )
 
 
-def tokenize(source: str) -> list[Token]:
+class ExprError(Exception):
+    """Raised for tokenization, parse, or evaluation errors."""
+    def __init__(self, message: str, pos: int | None = None) -> None:
+        self.pos = pos
+        snippet = f" (at position {pos})" if pos is not None else ""
+        super().__init__(f"{message}{snippet}")
+
+
+def tokenize(text: str) -> list[Token]:
     """
-    Convert *source* into a flat list of :class:`Token` objects followed by
-    a sentinel ``EOF`` token.
+    Lex *text* and return a list of Tokens ending with EOF.
 
-    Raises :class:`ParseError` on any unrecognised character.
-
-    >>> tokenize("1 + 2")  # doctest: +NORMALIZE_WHITESPACE
-    [Token(kind='NUMBER', value=1, pos=0),
-     Token(kind='+', value='+', pos=2),
-     Token(kind='NUMBER', value=2, pos=4),
-     Token(kind='EOF', value='', pos=5)]
+    >>> [t.kind for t in tokenize("1 + 2")]
+    ['NUMBER', 'OP', 'NUMBER', 'EOF']
+    >>> tokenize("3.14")[0].value
+    '3.14'
+    >>> tokenize("**")[0].value
+    '**'
     """
     tokens: list[Token] = []
-    for m in _TOKEN_RE.finditer(source):
+    for m in _TOKEN_RE.finditer(text):
         kind = m.lastgroup
-        raw  = m.group()
-        pos  = m.start()
+        value = m.group()
+        pos = m.start()
         if kind == "SKIP":
             continue
         if kind == "MISMATCH":
-            raise ParseError(f"unexpected character {raw!r} at position {pos}")
-        if kind == "NUMBER":
-            value: str | float | int = float(raw) if ("." in raw or "e" in raw.lower()) else int(raw)
-        else:
-            value = raw
+            raise ExprError(f"Unexpected character {value!r}", pos)
         tokens.append(Token(kind, value, pos))  # type: ignore[arg-type]
-    tokens.append(Token(TokenKind.EOF, "", len(source)))
+    tokens.append(Token(TK_EOF, "", len(text)))
     return tokens
 
 
 # ---------------------------------------------------------------------------
-# Parser  (recursive descent)
+# AST nodes
 # ---------------------------------------------------------------------------
-# Grammar (highest precedence first, right-associative ** noted):
+
+@dataclass
+class NumberNode:
+    value: float
+    pos: int
+
+
+@dataclass
+class NameNode:
+    name: str
+    pos: int
+
+
+@dataclass
+class UnaryNode:
+    op: str
+    operand: Any   # ASTNode
+    pos: int
+
+
+@dataclass
+class BinaryNode:
+    op: str
+    left: Any      # ASTNode
+    right: Any     # ASTNode
+    pos: int
+
+
+@dataclass
+class CallNode:
+    func: str
+    args: list[Any] = field(default_factory=list)   # list[ASTNode]
+    pos: int = 0
+
+
+ASTNode = NumberNode | NameNode | UnaryNode | BinaryNode | CallNode
+
+
+# ---------------------------------------------------------------------------
+# Recursive-descent parser
+# ---------------------------------------------------------------------------
 #
-#   expr      → additive
-#   additive  → multiplicative ( ('+' | '-') multiplicative )*
-#   multip    → unary ( ('*' | '/' | '//' | '%') unary )*
-#   power     → unary ( '**' power )?          ← right-assoc
+# Grammar (loosely):
+#   expr      → term    { ('+' | '-')   term    }
+#   term      → factor  { ('*' | '/' | '//' | '%')  factor }
+#   factor    → power
+#   power     → unary   { '**' unary }          (right-associative)
 #   unary     → '-' unary | primary
-#   primary   → NUMBER | NAME '(' arglist ')' | NAME | '(' expr ')'
-#   arglist   → expr (',' expr)*
+#   primary   → NUMBER | NAME ['(' arglist ')'] | '(' expr ')'
+#   arglist   → expr { ',' expr }
 
 class _Parser:
-    """Internal recursive-descent parser.  Not part of the public API."""
-
     def __init__(self, tokens: list[Token]) -> None:
         self._tokens = tokens
-        self._pos    = 0
+        self._pos = 0
 
-    # --- helpers ---
+    # -- helpers -------------------------------------------------------------
 
     def _peek(self) -> Token:
         return self._tokens[self._pos]
 
-    def _advance(self) -> Token:
+    def _consume(self) -> Token:
         tok = self._tokens[self._pos]
         self._pos += 1
         return tok
 
-    def _expect(self, kind: str) -> Token:
+    def _expect(self, kind: str, value: str | None = None) -> Token:
         tok = self._peek()
         if tok.kind != kind:
-            if tok.kind == TokenKind.EOF:
-                raise ParseError(f"unexpected end of input at position {tok.pos}")
-            raise ParseError(f"expected {kind!r} but got {tok.value!r} at position {tok.pos}")
-        return self._advance()
+            raise ExprError(
+                f"Expected {kind!r} but got {tok.kind!r} ({tok.value!r})",
+                tok.pos,
+            )
+        if value is not None and tok.value != value:
+            raise ExprError(
+                f"Expected {value!r} but got {tok.value!r}",
+                tok.pos,
+            )
+        return self._consume()
 
-    # --- grammar rules ---
+    def _match_op(self, *ops: str) -> Token | None:
+        tok = self._peek()
+        if tok.kind == TK_OP and tok.value in ops:
+            return self._consume()
+        return None
 
-    def parse(self):
-        """Parse a full expression and verify no trailing tokens remain."""
-        node = self._additive()
-        eof  = self._peek()
-        if eof.kind != TokenKind.EOF:
-            raise ParseError(f"unexpected token {eof.value!r} at position {eof.pos}")
+    # -- grammar rules -------------------------------------------------------
+
+    def parse(self) -> ASTNode:
+        node = self._expr()
+        if self._peek().kind != TK_EOF:
+            tok = self._peek()
+            raise ExprError(f"Unexpected token {tok.value!r}", tok.pos)
         return node
 
-    def _additive(self):
-        left = self._multiplicative()
-        while self._peek().kind in (TokenKind.PLUS, TokenKind.MINUS):
-            op  = self._advance()
-            rhs = self._multiplicative()
-            left = ("binop", op.kind, op.pos, left, rhs)
-        return left
+    def _expr(self) -> ASTNode:
+        node = self._term()
+        while True:
+            tok = self._match_op("+", "-")
+            if tok is None:
+                break
+            right = self._term()
+            node = BinaryNode(tok.value, node, right, tok.pos)
+        return node
 
-    def _multiplicative(self):
-        left = self._power()
-        while self._peek().kind in (TokenKind.STAR, TokenKind.SLASH,
-                                    TokenKind.DSLASH, TokenKind.PERCENT):
-            op  = self._advance()
-            rhs = self._power()
-            left = ("binop", op.kind, op.pos, left, rhs)
-        return left
+    def _term(self) -> ASTNode:
+        node = self._factor()
+        while True:
+            tok = self._match_op("*", "/", "//", "%")
+            if tok is None:
+                break
+            right = self._factor()
+            node = BinaryNode(tok.value, node, right, tok.pos)
+        return node
 
-    def _power(self):
-        """Right-associative exponentiation."""
+    def _factor(self) -> ASTNode:
+        # Delegate to power; exists as its own level so '*' and '/' bind
+        # tighter than '+'/'-' but looser than '**'.
+        return self._power()
+
+    def _power(self) -> ASTNode:
+        # Right-associative: a ** b ** c == a ** (b ** c)
         base = self._unary()
-        if self._peek().kind == TokenKind.DSTAR:
-            op  = self._advance()
-            exp = self._power()           # right-recursive for right-assoc
-            return ("binop", op.kind, op.pos, base, exp)
-        return base
+        tok = self._match_op("**")
+        if tok is None:
+            return base
+        exp = self._power()   # recurse for right-associativity
+        return BinaryNode("**", base, exp, tok.pos)
 
-    def _unary(self):
-        if self._peek().kind == TokenKind.MINUS:
-            op  = self._advance()
-            operand = self._unary()       # allow chained unary, e.g. --x
-            return ("unary", op.pos, operand)
+    def _unary(self) -> ASTNode:
+        tok = self._match_op("-")
+        if tok is not None:
+            operand = self._unary()
+            return UnaryNode("-", operand, tok.pos)
         return self._primary()
 
-    def _primary(self):
+    def _primary(self) -> ASTNode:
         tok = self._peek()
 
-        # Numeric literal
-        if tok.kind == TokenKind.NUMBER:
-            self._advance()
-            return ("num", tok.pos, tok.value)
-
-        # Identifier: either a function call or a variable reference
-        if tok.kind == TokenKind.NAME:
-            self._advance()
-            name = tok.value
-            pos  = tok.pos
-            if self._peek().kind == TokenKind.LPAREN:
-                self._advance()          # consume '('
-                args: list = []
-                if self._peek().kind != TokenKind.RPAREN:
-                    args.append(self._additive())
-                    while self._peek().kind == TokenKind.COMMA:
-                        self._advance()
-                        args.append(self._additive())
-                self._expect(TokenKind.RPAREN)
-                return ("call", pos, name, args)
-            return ("var", pos, name)
-
         # Parenthesised sub-expression
-        if tok.kind == TokenKind.LPAREN:
-            self._advance()
-            node = self._additive()
-            close = self._peek()
-            if close.kind != TokenKind.RPAREN:
-                raise ParseError(f"expected ')' at position {close.pos}")
-            self._advance()
+        if tok.kind == TK_LPAREN:
+            self._consume()
+            node = self._expr()
+            self._expect(TK_RPAREN)
             return node
 
-        if tok.kind == TokenKind.EOF:
-            raise ParseError(f"unexpected end of input at position {tok.pos}")
-        raise ParseError(f"unexpected token {tok.value!r} at position {tok.pos}")
+        # Number literal
+        if tok.kind == TK_NUMBER:
+            self._consume()
+            return NumberNode(float(tok.value), tok.pos)
+
+        # Name: variable or function call
+        if tok.kind == TK_NAME:
+            self._consume()
+            if self._peek().kind == TK_LPAREN:
+                # function call
+                self._consume()
+                args: list[ASTNode] = []
+                if self._peek().kind != TK_RPAREN:
+                    args.append(self._expr())
+                    while self._peek().kind == TK_COMMA:
+                        self._consume()
+                        args.append(self._expr())
+                self._expect(TK_RPAREN)
+                return CallNode(tok.value, args, tok.pos)
+            return NameNode(tok.value, tok.pos)
+
+        raise ExprError(
+            f"Unexpected token {tok.value!r} in expression",
+            tok.pos,
+        )
+
+
+def parse(text: str) -> ASTNode:
+    """
+    Parse *text* into an AST.
+
+    >>> isinstance(parse("1 + 2"), BinaryNode)
+    True
+    >>> parse("42").value
+    42.0
+    >>> parse("-x").op
+    '-'
+    """
+    tokens = tokenize(text)
+    return _Parser(tokens).parse()
 
 
 # ---------------------------------------------------------------------------
@@ -292,141 +328,123 @@ class _Parser:
 # ---------------------------------------------------------------------------
 
 # Built-in functions: name → (callable, min_arity, max_arity | None)
-# None for max_arity means variadic (no upper bound).
-_BUILTINS: dict[str, tuple] = {
+_BUILTINS: dict[str, tuple[Any, int, int | None]] = {
     "sin":  (math.sin,  1, 1),
     "cos":  (math.cos,  1, 1),
     "sqrt": (math.sqrt, 1, 1),
-    "min":  (min,       2, None),
+    "min":  (min,       2, None),   # 2+ args
     "max":  (max,       2, None),
 }
 
 
-def _eval_node(node, env: dict[str, float | int]) -> float | int:
-    """Recursively evaluate an AST node produced by :class:`_Parser`."""
+def _eval_node(node: ASTNode, variables: dict[str, float]) -> float:
     match node:
-        case ("num", _, value):
-            return value
+        case NumberNode(value=v):
+            return v
 
-        case ("var", pos, name):
-            if name in env:
-                return env[name]
-            raise EvalError(f"undefined variable {name!r} at position {pos}")
+        case NameNode(name=name, pos=pos):
+            if name in variables:
+                return float(variables[name])
+            raise ExprError(f"Undefined variable {name!r}", pos)
 
-        case ("unary", _, operand):
-            return -_eval_node(operand, env)
+        case UnaryNode(op="-", operand=operand):
+            return -_eval_node(operand, variables)
 
-        case ("binop", op, pos, left, right):
-            lv = _eval_node(left,  env)
-            rv = _eval_node(right, env)
+        case BinaryNode(op=op, left=left, right=right, pos=pos):
+            lv = _eval_node(left, variables)
+            rv = _eval_node(right, variables)
             match op:
                 case "+":  return lv + rv
                 case "-":  return lv - rv
                 case "*":  return lv * rv
                 case "/":
                     if rv == 0:
-                        raise EvalError(f"division by zero at position {pos}")
+                        raise ExprError("Division by zero", pos)
                     return lv / rv
                 case "//":
                     if rv == 0:
-                        raise EvalError(f"division by zero at position {pos}")
-                    return lv // rv
+                        raise ExprError("Integer division by zero", pos)
+                    return float(lv // rv)
                 case "%":
                     if rv == 0:
-                        raise EvalError(f"division by zero at position {pos}")
-                    return lv % rv
+                        raise ExprError("Modulo by zero", pos)
+                    return float(lv % rv)
                 case "**": return lv ** rv
-                case _:    raise EvalError(f"unknown operator {op!r} at position {pos}")
+                case _:
+                    raise ExprError(f"Unknown operator {op!r}", pos)
 
-        case ("call", pos, name, args):
-            if name not in _BUILTINS:
-                raise EvalError(f"unknown function {name!r} at position {pos}")
-            fn, min_a, max_a = _BUILTINS[name]
+        case CallNode(func=func, args=args, pos=pos):
+            if func not in _BUILTINS:
+                raise ExprError(f"Unknown function {func!r}", pos)
+            fn, min_a, max_a = _BUILTINS[func]
             n = len(args)
-            if n < min_a or (max_a is not None and n > max_a):
-                if min_a == max_a:
-                    raise EvalError(
-                        f"{name!r} expects {min_a} argument{'s' if min_a != 1 else ''}, "
-                        f"got {n} at position {pos}"
-                    )
-                bound = f"at least {min_a}"
-                raise EvalError(
-                    f"{name!r} expects {bound} argument{'s' if min_a != 1 else ''}, "
-                    f"got {n} at position {pos}"
+            if n < min_a:
+                raise ExprError(
+                    f"{func}() requires at least {min_a} argument(s), got {n}",
+                    pos,
                 )
-            evaluated = [_eval_node(a, env) for a in args]
-            try:
-                return fn(*evaluated)
-            except Exception as exc:
-                raise EvalError(f"error in {name!r} at position {pos}: {exc}") from exc
+            if max_a is not None and n > max_a:
+                raise ExprError(
+                    f"{func}() takes at most {max_a} argument(s), got {n}",
+                    pos,
+                )
+            evaluated = [_eval_node(a, variables) for a in args]
+            return float(fn(*evaluated))
 
         case _:
-            raise EvalError(f"unknown AST node: {node!r}")
+            raise ExprError("Unknown AST node type")
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def evaluate(source: str, *, env: dict[str, float | int] | None = None) -> float | int:
+def evaluate(text: str, variables: dict[str, float] | None = None) -> float:
     """
-    Tokenize, parse, and evaluate an arithmetic expression string.
+    Tokenize, parse, and evaluate *text*.  Return the result as a float.
 
-    Parameters
-    ----------
-    source : str
-        The expression to evaluate.
-    env : dict, optional
-        A mapping of variable names to numeric values.  Defaults to an empty
-        dict, so any variable reference raises :class:`EvalError`.
+    *variables* maps name strings to numeric values.
 
-    Returns
-    -------
-    int or float
-
-    Raises
-    ------
-    ParseError
-        If the input cannot be tokenized or parsed.
-    EvalError
-        If the expression is syntactically valid but cannot be evaluated
-        (division by zero, unknown variable, bad arity, etc.).
-
-    Examples
-    --------
-    >>> evaluate("2 + 3")
-    5
-    >>> evaluate("2 ** 8")
-    256
+    >>> evaluate("3 + 4 * 2")
+    11.0
+    >>> evaluate("(3 + 4) * 2")
+    14.0
+    >>> evaluate("2 ** 3 ** 2")   # right-associative: 2 ** (3 ** 2) = 512
+    512.0
+    >>> evaluate("10 / 4")
+    2.5
+    >>> evaluate("10 // 4")
+    2.0
+    >>> evaluate("10 % 3")
+    1.0
+    >>> evaluate("-(-5)")
+    5.0
     >>> evaluate("sqrt(9)")
     3.0
-    >>> evaluate("pi * r**2", env={"pi": 3.14159265, "r": 5})
-    78.53981625
+    >>> evaluate("min(5, 3, 8, 1)")
+    1.0
+    >>> evaluate("max(5, 3, 8, 1)")
+    8.0
+    >>> evaluate("x + y", {"x": 10, "y": 32})
+    42.0
     """
-    if env is None:
-        env = {}
-    tokens = tokenize(source)
-    parser = _Parser(tokens)
-    ast    = parser.parse()
-    return _eval_node(ast, env)
+    vars_: dict[str, float] = {} if variables is None else variables
+    ast = parse(text)
+    return _eval_node(ast, vars_)
 
 
 # ---------------------------------------------------------------------------
 # REPL
 # ---------------------------------------------------------------------------
 
+_HELP = """\
+expr REPL — arithmetic evaluator
+  Operators : +  -  *  /  //  %  **  (  )
+  Functions : sin  cos  sqrt  min  max
+  Variables : assign with  name = expr
+  Commands  : help, vars, quit / exit / Ctrl-D
+"""
+
+
 def _repl() -> None:
-    """
-    Interactive read-eval-print loop.
-
-    Special commands:
-      vars          — list all currently defined variables
-      <name> = <expr>  — assign a variable
-      quit / exit   — exit the REPL
-    """
-    print("expr REPL  (type 'quit' or 'exit' to leave, 'vars' to list variables)")
-    env: dict[str, float | int] = {}
-
+    print(_HELP)
+    variables: dict[str, float] = {}
     while True:
         try:
             line = input(">>> ").strip()
@@ -436,13 +454,14 @@ def _repl() -> None:
 
         if not line:
             continue
-
         if line in ("quit", "exit"):
             break
-
+        if line == "help":
+            print(_HELP)
+            continue
         if line == "vars":
-            if env:
-                for k, v in sorted(env.items()):
+            if variables:
+                for k, v in sorted(variables.items()):
                     print(f"  {k} = {v}")
             else:
                 print("  (no variables defined)")
@@ -451,88 +470,21 @@ def _repl() -> None:
         # Assignment:  name = expr
         assign_match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.+)", line)
         if assign_match:
-            name, expr_src = assign_match.group(1), assign_match.group(2)
+            name, expr_text = assign_match.groups()
             try:
-                result = evaluate(expr_src, env=env)
-                env[name] = result
+                result = evaluate(expr_text, variables)
+                variables[name] = result
                 print(f"  {name} = {result}")
-            except ExprError as exc:
-                print(f"  Error: {exc}")
+            except ExprError as e:
+                print(f"  Error: {e}")
             continue
 
         # Plain expression
         try:
-            result = evaluate(line, env=env)
+            result = evaluate(line, variables)
             print(f"  {result}")
-        except ExprError as exc:
-            print(f"  Error: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# Self-checks (run with: python -m doctest expr.py -v)
-# ---------------------------------------------------------------------------
-
-def _run_self_checks() -> None:
-    """Run a small suite of inline assertions to smoke-test the module."""
-    def approx(a, b, tol=1e-9):
-        return abs(a - b) < tol
-
-    # Basic arithmetic
-    assert evaluate("1 + 2")           == 3
-    assert evaluate("10 - 3")          == 7
-    assert evaluate("4 * 5")           == 20
-    assert evaluate("7 / 2")           == 3.5
-    assert evaluate("7 // 2")          == 3
-    assert evaluate("7 % 3")           == 1
-    assert evaluate("2 ** 10")         == 1024
-
-    # Precedence
-    assert evaluate("2 + 3 * 4")       == 14
-    assert evaluate("(2 + 3) * 4")     == 20
-    assert evaluate("2 ** 3 ** 2")     == 512   # right-assoc: 2**(3**2)
-
-    # Unary minus
-    assert evaluate("-3")              == -3
-    assert evaluate("--3")             == 3
-    assert evaluate("-(-5)")           == 5
-    assert evaluate("2 * -3")          == -6
-
-    # Variables
-    assert evaluate("x + 1",   env={"x": 41})     == 42
-    assert evaluate("x * y",   env={"x": 6, "y": 7}) == 42
-
-    # Functions
-    assert approx(evaluate("sin(0)"),    0.0)
-    assert approx(evaluate("cos(0)"),    1.0)
-    assert approx(evaluate("sqrt(16)"),  4.0)
-    assert evaluate("min(3, 1, 2)")    == 1
-    assert evaluate("max(1, 100, 50)") == 100
-
-    # Error cases
-    import traceback
-
-    def raises(kind, expr, env=None):
-        try:
-            evaluate(expr, env=env or {})
-            return False
-        except kind:
-            return True
-        except Exception:
-            return False
-
-    assert raises(EvalError,  "1 / 0")
-    assert raises(EvalError,  "1 // 0")
-    assert raises(EvalError,  "1 % 0")
-    assert raises(EvalError,  "foo(1)")
-    assert raises(EvalError,  "sin(1, 2)")
-    assert raises(EvalError,  "min(1)")
-    assert raises(EvalError,  "unknownVar")
-    assert raises(ParseError, "1 +")
-    assert raises(ParseError, "(1 + 2")
-    assert raises(ParseError, "1 2")
-    assert raises(ParseError, "@")
-
-    print("All self-checks passed.")
+        except ExprError as e:
+            print(f"  Error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -540,12 +492,13 @@ def _run_self_checks() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
-    if "--test" in sys.argv:
-        _run_self_checks()
-    elif "--doctest" in sys.argv:
-        import doctest
-        results = doctest.testmod(verbose=True)
-        sys.exit(0 if results.failed == 0 else 1)
+    if len(sys.argv) > 1:
+        # Non-interactive: evaluate the first argument and print the result.
+        expr_arg = " ".join(sys.argv[1:])
+        try:
+            print(evaluate(expr_arg))
+        except ExprError as err:
+            print(f"Error: {err}", file=sys.stderr)
+            sys.exit(1)
     else:
         _repl()

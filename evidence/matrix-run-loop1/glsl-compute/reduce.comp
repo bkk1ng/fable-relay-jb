@@ -1,0 +1,55 @@
+#version 450
+
+// Parallel reduction: sum of a float array using shared memory tree reduction.
+// Each workgroup reduces LOCAL_SIZE elements into one partial sum, written to
+// partialSums[gl_WorkGroupID.x]. A second dispatch (or CPU readback) folds
+// the partial sums to the final result.
+
+layout(local_size_x = 256) in;
+
+// Input buffer — may be any length, including non-multiples of 256.
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    float data[];
+};
+
+// One float per workgroup; caller allocates ceil(elementCount / 256) entries.
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    float partialSums[];
+};
+
+// Push constant carries the true element count so out-of-bounds lanes zero out.
+layout(push_constant) uniform PushConstants {
+    uint elementCount;
+};
+
+// Shared memory tile: one slot per lane in the workgroup.
+shared float tile[256];
+
+void main() {
+    uint gid    = gl_GlobalInvocationID.x;   // global element index
+    uint lid    = gl_LocalInvocationID.x;    // lane within workgroup
+    uint wgid   = gl_WorkGroupID.x;          // which workgroup this is
+
+    // Load — lanes beyond the array end contribute 0 (additive identity).
+    tile[lid] = (gid < elementCount) ? data[gid] : 0.0;
+
+    // Wait until every lane in the workgroup has written its value.
+    barrier();
+    memoryBarrierShared();
+
+    // Tree reduction: each step halves the active lane count.
+    // stride = 128, 64, 32, 16, 8, 4, 2, 1
+    for (uint stride = 128u; stride >= 1u; stride >>= 1u) {
+        if (lid < stride) {
+            tile[lid] += tile[lid + stride];
+        }
+        // Synchronise before the next level so every write is visible.
+        barrier();
+        memoryBarrierShared();
+    }
+
+    // Lane 0 holds the workgroup sum; write it to the output buffer.
+    if (lid == 0u) {
+        partialSums[wgid] = tile[0];
+    }
+}

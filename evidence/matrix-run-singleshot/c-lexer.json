@@ -1,0 +1,21 @@
+{
+ "id": "c-lexer",
+ "lang": "c",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. lex.h and lex.c: tokenizer for a small config language (identifiers, numbers incl floats, string literals with escapes, punctuation, // and /* */ comments, newlines). lex_next returns a token struct with type, start pointer, length, line number. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: lex.c",
+ "stop": "tool_use",
+ "out_tokens": 8704,
+ "files": {
+  "lex.h": "/*\n * lex.h \u2014 tokenizer for a small config language\n * C11, no external dependencies.\n */\n#pragma once\n\n#include <stddef.h>\n\n/* ------------------------------------------------------------------ */\n/* Token types                                                         */\n/* ------------------------------------------------------------------ */\n\ntypedef enum {\n    TOK_EOF,       /* end of input                                      */\n    TOK_IDENT,     /* [A-Za-z_][A-Za-z0-9_]*                           */\n    TOK_NUMBER,    /* integer, hex (0x\u2026), or float (with . and/or e/E) */\n    TOK_STRING,    /* \"\u2026\" \u2014 raw source text including the quote chars   */\n    TOK_PUNCT,     /* any single punctuation / operator character       */\n    TOK_NEWLINE,   /* '\\n'  (line feeds are returned as explicit tokens) */\n    TOK_ERROR,     /* unterminated string literal or block comment      */\n} TokenType;\n\n/* ------------------------------------------------------------------ */\n/* Token                                                               */\n/* ------------------------------------------------------------------ */\n\n/*\n * 'start' points into the caller's source buffer; the buffer must\n * remain valid for the lifetime of any token referencing it.\n * 'len'  is the byte count of the raw source text (string tokens\n *        include both enclosing double-quote characters).\n * 'line' is the 1-based line number on which the token begins.\n */\ntypedef struct {\n    TokenType   type;\n    const char *start;\n    size_t      len;\n    int         line;\n} Token;\n\n/* ------------------------------------------------------------------ */\n/* Lexer state                                                         */\n/* ------------------------------------------------------------------ */\n\ntypedef struct {\n    const char *src;   /* pointer to start of source buffer (read-only) */\n    const char *cur;   /* current read position                         */\n    int         line;  /* 1-based line number at 'cur'                  */\n} Lexer;\n\n/* ------------------------------------------------------------------ */\n/* API                                                                 */\n/* ------------------------------------------------------------------ */\n\n/* Initialise *l to scan the NUL-terminated string 'src'. */\nvoid        lex_init      (Lexer *l, const char *src);\n\n/*\n * Advance the lexer and return the next token.\n * - Whitespace (spaces, tabs, CR) is silently consumed between tokens.\n * - '//' comments are consumed to end-of-line; the '\\n' that follows\n *   is still returned as TOK_NEWLINE.\n * - '/ *\u2026* /' comments (including multi-line) are consumed entirely.\n *   Line numbers inside block comments are tracked correctly.\n * - An unterminated block comment or string literal yields TOK_ERROR\n *   whose 'start'/'len' span the bad text so the caller can report it.\n * - After TOK_EOF, every subsequent call returns TOK_EOF.\n */\nToken       lex_next      (Lexer *l);\n\n/* Return a short, stable C string naming the token type (for debugging). */\nconst char *tok_type_name (TokenType t);\n"
+ },
+ "prose": "",
+ "secs": 37.5
+}

@@ -1,388 +1,566 @@
 """
-linreg.py - Multivariate linear regression by gradient descent.
+linreg.py — Multivariate linear regression by gradient descent.
 
-Python 3.12, standard library only (no numpy).
+Features
+--------
+- Feature standardisation (z-score, fit on train, applied to any split)
+- Learning-rate validation with early-divergence guard
+- Per-epoch MSE loss history
+- R² and RMSE on a held-out test split
+- CSV loading / saving (stdlib csv module)
+- __main__ demo on a generated synthetic dataset
 
-Features:
-  - Feature standardisation (z-score) with stored parameters for reuse
-  - Learning-rate validation (positive check, divergence detection)
-  - Loss history tracking (MSE per epoch)
-  - R^2 and RMSE metrics on a holdout split
-  - CSV loading (header-optional, comma-delimited)
-  - __main__ demo on a generated synthetic dataset
-
-Usage:
-    python linreg.py                 # run the demo on generated data
-    python linreg.py data.csv        # load CSV (last column = target, 20% test)
-    python linreg.py data.csv 0.25   # custom test ratio
+Python 3.12, stdlib only — no numpy, no third-party packages.
 """
+
+from __future__ import annotations
 
 import csv
 import math
+import os
 import random
-import sys
-
-# Type aliases for readability
-Matrix = list[list[float]]
-Vector = list[float]
+import statistics
+import warnings
+from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
-# Data utilities
+# Linear algebra helpers (pure Python, list-of-lists)
 # ---------------------------------------------------------------------------
 
-def load_csv(path: str, has_header: bool = True) -> tuple[Matrix, Vector]:
-    """Load a CSV file and return (X, y).
-
-    The last column is the target; every preceding column is a feature.
-    All cells must parse as float.  Set has_header=False for headerless files.
-    """
-    rows: Matrix = []
-    with open(path, newline="") as f:
-        all_rows = list(csv.reader(f))
-
-    if has_header and all_rows:
-        all_rows = all_rows[1:]
-
-    for raw in all_rows:
-        if not raw:
-            continue
-        rows.append([float(v) for v in raw])
-
-    if not rows:
-        raise ValueError(f"No data rows found in {path!r}")
-
-    X = [r[:-1] for r in rows]
-    y = [r[-1] for r in rows]
-    return X, y
+def _dot(a: list[float], b: list[float]) -> float:
+    """Dot product of two equal-length vectors."""
+    return sum(x * y for x, y in zip(a, b))
 
 
-def train_test_split(
-    X: Matrix,
-    y: Vector,
-    test_ratio: float = 0.2,
-    seed: int | None = None,
-) -> tuple[Matrix, Vector, Matrix, Vector]:
-    """Shuffle and split into (X_train, y_train, X_test, y_test)."""
-    if not 0.0 < test_ratio < 1.0:
-        raise ValueError("test_ratio must be in (0, 1)")
+def _mat_vec_mul(A: list[list[float]], v: list[float]) -> list[float]:
+    """Matrix × vector multiply.  A is (m × n), v is (n,) → (m,)."""
+    return [_dot(row, v) for row in A]
 
-    n = len(X)
-    idx = list(range(n))
-    rng = random.Random(seed)
-    rng.shuffle(idx)
 
-    cut = int(n * (1.0 - test_ratio))
-    train_idx, test_idx = idx[:cut], idx[cut:]
+def _transpose(A: list[list[float]]) -> list[list[float]]:
+    """Transpose (m × n) → (n × m)."""
+    if not A:
+        return []
+    m, n = len(A), len(A[0])
+    return [[A[i][j] for i in range(m)] for j in range(n)]
 
-    X_train = [X[i] for i in train_idx]
-    y_train = [y[i] for i in train_idx]
-    X_test = [X[i] for i in test_idx]
-    y_test = [y[i] for i in test_idx]
-    return X_train, y_train, X_test, y_test
+
+def _prepend_ones(X: list[list[float]]) -> list[list[float]]:
+    """Add a leading 1 to every row (bias / intercept column)."""
+    return [[1.0] + row for row in X]
 
 
 # ---------------------------------------------------------------------------
-# Feature standardisation
+# Standardisation
 # ---------------------------------------------------------------------------
 
 class StandardScaler:
-    """Z-score standardisation: (x - mean) / std.
+    """
+    Z-score scaler: fit on training data, transform any split.
 
-    Fit on training data, then transform any data with the same parameters.
-    Constant columns (std == 0) are centred but left unscaled (std -> 1).
+    Uses population standard deviation so a single-sample feature column
+    still produces a defined (zero) result rather than raising.
     """
 
     def __init__(self) -> None:
-        self.means: Vector = []
-        self.stds: Vector = []
+        self.means_: list[float] = []
+        self.stds_: list[float] = []
 
-    def fit(self, X: Matrix) -> "StandardScaler":
-        n = len(X)
-        if n == 0:
-            raise ValueError("Cannot fit on empty matrix")
-        k = len(X[0])
-        self.means = [sum(row[j] for row in X) / n for j in range(k)]
-        self.stds = [
-            # population std; guard against divide-by-zero on constant columns
-            math.sqrt(sum((row[j] - self.means[j]) ** 2 for row in X) / n) or 1.0
-            for j in range(k)
-        ]
+    def fit(self, X: list[list[float]]) -> "StandardScaler":
+        n_features = len(X[0])
+        self.means_ = []
+        self.stds_ = []
+        for j in range(n_features):
+            col = [X[i][j] for i in range(len(X))]
+            mu = statistics.mean(col)
+            sigma = statistics.pstdev(col)
+            self.means_.append(mu)
+            self.stds_.append(sigma if sigma > 0.0 else 1.0)
         return self
 
-    def transform(self, X: Matrix) -> Matrix:
+    def transform(self, X: list[list[float]]) -> list[list[float]]:
+        if not self.means_:
+            raise RuntimeError("StandardScaler has not been fitted.")
         return [
-            [(row[j] - self.means[j]) / self.stds[j] for j in range(len(row))]
-            for row in X
+            [(X[i][j] - self.means_[j]) / self.stds_[j] for j in range(len(X[0]))]
+            for i in range(len(X))
         ]
 
-    def fit_transform(self, X: Matrix) -> Matrix:
-        self.fit(X)
-        return self.transform(X)
+    def fit_transform(self, X: list[list[float]]) -> list[list[float]]:
+        return self.fit(X).transform(X)
+
+
+# ---------------------------------------------------------------------------
+# Learning-rate validation
+# ---------------------------------------------------------------------------
+
+class LearningRateError(ValueError):
+    """Raised when the supplied learning rate is invalid."""
+
+
+def _validate_learning_rate(lr: float) -> None:
+    """
+    Raise LearningRateError if lr is non-numeric, non-finite, or ≤ 0.
+    Issue a UserWarning if lr > 10 (unusual range, likely to diverge).
+    """
+    if not isinstance(lr, (int, float)):
+        raise LearningRateError(
+            f"learning_rate must be a float, got {type(lr).__name__}."
+        )
+    if math.isnan(lr) or math.isinf(lr):
+        raise LearningRateError(
+            f"learning_rate must be finite, got {lr!r}."
+        )
+    if lr <= 0.0:
+        raise LearningRateError(
+            f"learning_rate must be > 0, got {lr}."
+        )
+    if lr > 10.0:
+        warnings.warn(
+            f"learning_rate={lr} is unusually large (> 10); "
+            "gradient descent may diverge.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 
-def mean_squared_error(y_true: Vector, y_pred: Vector) -> float:
+def mse(y_true: list[float], y_pred: list[float]) -> float:
     n = len(y_true)
-    return sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred)) / n
+    return sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / n
 
 
-def root_mean_squared_error(y_true: Vector, y_pred: Vector) -> float:
-    return math.sqrt(mean_squared_error(y_true, y_pred))
+def rmse(y_true: list[float], y_pred: list[float]) -> float:
+    return math.sqrt(mse(y_true, y_pred))
 
 
-def r_squared(y_true: Vector, y_pred: Vector) -> float:
-    """Coefficient of determination R^2."""
-    n = len(y_true)
-    y_bar = sum(y_true) / n
-    ss_res = sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred))
-    ss_tot = sum((yt - y_bar) ** 2 for yt in y_true)
+def r_squared(y_true: list[float], y_pred: list[float]) -> float:
+    mean_y = statistics.mean(y_true)
+    ss_tot = sum((y - mean_y) ** 2 for y in y_true)
+    ss_res = sum((a - b) ** 2 for a, b in zip(y_true, y_pred))
     if ss_tot == 0.0:
-        return 0.0
+        return 1.0 if ss_res == 0.0 else 0.0
     return 1.0 - ss_res / ss_tot
 
 
 # ---------------------------------------------------------------------------
-# Linear regression via gradient descent
+# Train / test split
 # ---------------------------------------------------------------------------
 
-class LinearRegressionGD:
-    """Multivariate linear regression trained by batch gradient descent.
+def train_test_split(
+    X: list[list[float]],
+    y: list[float],
+    test_size: float = 0.2,
+    seed: int | None = None,
+) -> tuple[list[list[float]], list[list[float]], list[float], list[float]]:
+    """
+    Randomly shuffle then split (X, y) into train and test subsets.
 
     Parameters
     ----------
-    learning_rate : float
-        Step size for gradient updates.  Must be strictly positive.
-    n_epochs : int
-        Number of full passes over the training data.
-    tolerance : float
-        Early-stop threshold: stop when the absolute change in loss between
-        consecutive epochs falls below this value.
+    X         : feature matrix
+    y         : target vector
+    test_size : fraction of samples to place in the test set (0 < test_size < 1)
+    seed      : random seed for reproducibility
 
-    Attributes
+    Returns
+    -------
+    X_train, X_test, y_train, y_test
+    """
+    if not (0.0 < test_size < 1.0):
+        raise ValueError(f"test_size must be in (0, 1), got {test_size}.")
+    n = len(X)
+    indices = list(range(n))
+    random.Random(seed).shuffle(indices)
+    n_test = max(1, int(n * test_size))
+    test_idx  = set(indices[:n_test])
+    train_idx = [i for i in indices if i not in test_idx]
+    test_idx  = indices[:n_test]
+    return (
+        [X[i] for i in train_idx],
+        [X[i] for i in test_idx],
+        [y[i] for i in train_idx],
+        [y[i] for i in test_idx],
+    )
+
+
+# ---------------------------------------------------------------------------
+# CSV I/O
+# ---------------------------------------------------------------------------
+
+def load_csv(
+    path: str,
+    target_col: int = -1,
+    has_header: bool = True,
+) -> tuple[list[list[float]], list[float], list[str]]:
+    """
+    Load a CSV file into a feature matrix and target vector.
+
+    Parameters
     ----------
-    weights : list[float]
-        Learned coefficients with weights[0] as the bias / intercept.
-    loss_history : list[float]
-        MSE recorded after each epoch (length <= n_epochs).
-    converged : bool
-        True if training stopped early due to tolerance.
-    diverged : bool
-        True if training aborted due to loss explosion (bad learning rate).
+    path       : path to the CSV file
+    target_col : column index of the target variable; -1 = last column
+    has_header : True if the first row contains column names
+
+    Returns
+    -------
+    X              : list[list[float]] — feature matrix (all columns except target)
+    y              : list[float]       — target vector
+    feature_names  : list[str]         — feature column names (empty if no header)
+    """
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+
+    if not rows:
+        raise ValueError(f"CSV file '{path}' is empty.")
+
+    feature_names: list[str] = []
+    start = 0
+
+    if has_header:
+        header = rows[0]
+        start = 1
+        n_cols = len(header)
+        tc = target_col if target_col >= 0 else n_cols + target_col
+        feature_names = [header[j] for j in range(n_cols) if j != tc]
+
+    X: list[list[float]] = []
+    y: list[float] = []
+
+    for lineno, row in enumerate(rows[start:], start=start + 1):
+        if not any(cell.strip() for cell in row):   # skip blank lines
+            continue
+        try:
+            vals = [float(cell.strip()) for cell in row]
+        except ValueError as exc:
+            raise ValueError(f"Non-numeric value at line {lineno}: {exc}") from exc
+        n_cols = len(vals)
+        tc = target_col if target_col >= 0 else n_cols + target_col
+        y.append(vals[tc])
+        X.append([vals[j] for j in range(n_cols) if j != tc])
+
+    if not X:
+        raise ValueError(f"CSV file '{path}' contains no data rows.")
+
+    return X, y, feature_names
+
+
+def save_csv(
+    path: str,
+    X: list[list[float]],
+    y: list[float],
+    feature_names: list[str] | None = None,
+    target_name: str = "target",
+) -> None:
+    """Write (X, y) to a CSV file with an optional header row."""
+    n_features = len(X[0]) if X else 0
+    if feature_names is None:
+        feature_names = [f"x{i}" for i in range(n_features)]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(feature_names + [target_name])
+        for xi, yi in zip(X, y):
+            writer.writerow(list(xi) + [yi])
+
+
+# ---------------------------------------------------------------------------
+# Linear regression model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LinearRegression:
+    """
+    Multivariate linear regression trained by batch gradient descent.
+
+    Parameters
+    ----------
+    learning_rate : step size η for the weight update rule
+    n_epochs      : number of full passes over the training data
+    standardize   : z-score features before training (recommended)
+    verbose       : print loss every `verbose` epochs; 0 = silent
+
+    Attributes set after fit()
+    --------------------------
+    weights_       : full weight vector [bias, w₁, w₂, …, wₙ]
+    coef_          : feature weights (excludes bias)
+    intercept_     : bias term
+    loss_history_  : MSE at the end of every epoch
+    scaler_        : fitted StandardScaler (None if standardize=False)
+    n_features_    : number of input features
     """
 
-    def __init__(
-        self,
-        learning_rate: float = 0.01,
-        n_epochs: int = 1000,
-        tolerance: float = 1e-8,
-    ) -> None:
-        # Learning-rate validation
-        if learning_rate <= 0:
+    learning_rate: float = 0.01
+    n_epochs: int = 1_000
+    standardize: bool = True
+    verbose: int = 0
+
+    weights_: list[float] = field(default_factory=list, init=False, repr=False)
+    loss_history_: list[float] = field(default_factory=list, init=False, repr=False)
+    scaler_: StandardScaler | None = field(default=None, init=False, repr=False)
+    n_features_: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_learning_rate(self.learning_rate)
+        if not isinstance(self.n_epochs, int) or self.n_epochs < 1:
+            raise ValueError(f"n_epochs must be a positive integer, got {self.n_epochs}.")
+
+    # ------------------------------------------------------------------
+    def fit(self, X: list[list[float]], y: list[float]) -> "LinearRegression":
+        """
+        Fit the model using batch gradient descent.
+
+        The update rule at each epoch is:
+            ŷ = X_aug @ w
+            L = (1/n) ‖ŷ − y‖²
+            ∇L = (2/n) X_aug.T @ (ŷ − y)
+            w  ← w − η · ∇L
+
+        Parameters
+        ----------
+        X : (n_samples × n_features) feature matrix
+        y : (n_samples,) target vector
+        """
+        if len(X) != len(y):
             raise ValueError(
-                f"learning_rate must be positive, got {learning_rate}"
+                f"X has {len(X)} rows but y has {len(y)} elements."
             )
-        if not math.isfinite(learning_rate):
-            raise ValueError("learning_rate must be a finite number")
-        if n_epochs <= 0:
-            raise ValueError(f"n_epochs must be positive, got {n_epochs}")
+        if len(X) == 0:
+            raise ValueError("Training data is empty.")
 
-        self.learning_rate = learning_rate
-        self.n_epochs = n_epochs
-        self.tolerance = tolerance
+        self.n_features_ = len(X[0])
 
-        self.weights: Vector = []
-        self.loss_history: list[float] = []
-        self.converged = False
-        self.diverged = False
+        # --- optional standardisation ---
+        if self.standardize:
+            self.scaler_ = StandardScaler()
+            X_proc = self.scaler_.fit_transform(X)
+        else:
+            self.scaler_ = None
+            X_proc = [row[:] for row in X]
 
-    # -- core training --------------------------------------------------------
+        # --- augment with bias column ---
+        X_aug = _prepend_ones(X_proc)          # shape: n × (d+1)
+        n, d_aug = len(X_aug), len(X_aug[0])
 
-    def fit(self, X: Matrix, y: Vector) -> "LinearRegressionGD":
-        n = len(X)
-        if n == 0:
-            raise ValueError("Training data is empty")
-        k = len(X[0])
+        # --- initialise weights to zero ---
+        self.weights_ = [0.0] * d_aug
+        self.loss_history_ = []
+        lr = self.learning_rate
+        epoch_width = len(str(self.n_epochs))
 
-        # weights[0] = bias, weights[1:] = per-feature coefficients
-        self.weights = [0.0] * (k + 1)
-        self.loss_history = []
-        self.converged = False
-        self.diverged = False
+        for epoch in range(1, self.n_epochs + 1):
+            # forward pass
+            y_pred = _mat_vec_mul(X_aug, self.weights_)
 
-        prev_loss = float("inf")
+            # residuals and MSE loss
+            residuals = [yh - yt for yh, yt in zip(y_pred, y)]
+            loss = sum(r * r for r in residuals) / n
+            self.loss_history_.append(loss)
 
-        for epoch in range(self.n_epochs):
-            # Forward pass
-            preds = [self._predict_row(row) for row in X]
-            errors = [preds[i] - y[i] for i in range(n)]
-
-            # MSE loss
-            loss = sum(e * e for e in errors) / n
-            self.loss_history.append(loss)
-
-            # Divergence detection (learning-rate validation at runtime)
+            # divergence guard
             if math.isnan(loss) or math.isinf(loss):
-                self.diverged = True
-                raise ValueError(
-                    f"Loss became non-finite at epoch {epoch}. "
-                    "Learning rate is too high - reduce it and retry."
-                )
-            if epoch > 10 and loss > prev_loss * 10:
-                self.diverged = True
-                raise ValueError(
-                    f"Loss increased sharply at epoch {epoch} "
-                    f"(from {prev_loss:.6e} to {loss:.6e}). "
-                    "Learning rate is too high - reduce it and retry."
+                raise RuntimeError(
+                    f"Loss became {loss} at epoch {epoch}. "
+                    "Reduce learning_rate and re-fit."
                 )
 
-            # Convergence check
-            if epoch > 0 and abs(prev_loss - loss) < self.tolerance:
-                self.converged = True
-                break
+            # gradients: (2/n) · Xᵀ · residuals
+            X_T = _transpose(X_aug)
+            grad = _mat_vec_mul(X_T, residuals)
+            scale = 2.0 / n
+            self.weights_ = [w - lr * scale * g for w, g in zip(self.weights_, grad)]
 
-            # Gradients: dMSE/dw = (2/n) * X^T @ errors
-            grad_bias = (2.0 / n) * sum(errors)
-            grad_w = [
-                (2.0 / n) * sum(errors[i] * X[i][j] for i in range(n))
-                for j in range(k)
-            ]
-
-            # Parameter update
-            self.weights[0] -= self.learning_rate * grad_bias
-            for j in range(k):
-                self.weights[j + 1] -= self.learning_rate * grad_w[j]
-
-            prev_loss = loss
+            if self.verbose and epoch % self.verbose == 0:
+                print(
+                    f"  epoch {epoch:{epoch_width}d}/{self.n_epochs}"
+                    f"  loss={loss:.6f}"
+                )
 
         return self
 
-    # -- inference ------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def predict(self, X: list[list[float]]) -> list[float]:
+        """Return predictions for the given feature matrix."""
+        if not self.weights_:
+            raise RuntimeError("Model has not been fitted yet. Call fit() first.")
+        X_proc = self.scaler_.transform(X) if self.scaler_ is not None else X
+        return _mat_vec_mul(_prepend_ones(X_proc), self.weights_)
 
-    def _predict_row(self, row: list[float]) -> float:
-        return self.weights[0] + sum(
-            self.weights[j + 1] * row[j] for j in range(len(row))
-        )
+    # ------------------------------------------------------------------
+    def evaluate(
+        self,
+        X: list[list[float]],
+        y: list[float],
+    ) -> dict[str, float]:
+        """
+        Compute regression metrics on the given split.
 
-    def predict(self, X: Matrix) -> Vector:
-        return [self._predict_row(row) for row in X]
+        Returns a dict with keys 'rmse', 'r2', and 'mse'.
+        """
+        y_pred = self.predict(X)
+        return {
+            "rmse": rmse(y, y_pred),
+            "r2":   r_squared(y, y_pred),
+            "mse":  mse(y, y_pred),
+        }
 
-    def score(self, X: Matrix, y: Vector) -> tuple[float, float]:
-        """Return (R^2, RMSE) for the given data."""
-        preds = self.predict(X)
-        return r_squared(y, preds), root_mean_squared_error(y, preds)
+    # ------------------------------------------------------------------
+    @property
+    def coef_(self) -> list[float]:
+        """Learned feature weights (excluding the bias / intercept)."""
+        return self.weights_[1:]
+
+    @property
+    def intercept_(self) -> float:
+        """Learned bias term (w₀)."""
+        return self.weights_[0]
 
 
 # ---------------------------------------------------------------------------
-# Synthetic dataset generator (for the demo)
+# Demo helpers
 # ---------------------------------------------------------------------------
 
-def generate_dataset(
-    n_samples: int = 500,
-    n_features: int = 3,
-    noise: float = 2.0,
+def _generate_dataset(
+    n_samples: int,
+    true_weights: list[float],
+    true_bias: float = 0.0,
+    noise_std: float = 1.0,
     seed: int = 42,
-) -> tuple[Matrix, Vector]:
-    """Create a synthetic multivariate regression dataset.
+) -> tuple[list[list[float]], list[float]]:
+    """
+    Generate a synthetic regression dataset:
+        y = X @ true_weights + true_bias + ε,   ε ~ N(0, noise_std²)
 
-    True model: y = 3.5*x0 - 2.0*x1 + 1.0*x2 + 5.0 + N(0, noise)
-    Features are drawn from N(0, 3.0).
+    Features are drawn from N(0, 1).
     """
     rng = random.Random(seed)
-    true_w = [3.5, -2.0, 1.0][:n_features]
-    # Pad if more features are requested than the base weights define
-    while len(true_w) < n_features:
-        true_w.append(rng.uniform(-3.0, 3.0))
-    true_b = 5.0
-
-    X: Matrix = []
-    y: Vector = []
-    for _ in range(n_samples):
-        row = [rng.gauss(0.0, 3.0) for _ in range(n_features)]
-        target = true_b + sum(true_w[j] * row[j] for j in range(n_features))
-        target += rng.gauss(0.0, noise)
-        X.append(row)
-        y.append(target)
+    n_features = len(true_weights)
+    X = [
+        [rng.gauss(0.0, 1.0) for _ in range(n_features)]
+        for _ in range(n_samples)
+    ]
+    y = [
+        _dot(X[i], true_weights) + true_bias + rng.gauss(0.0, noise_std)
+        for i in range(n_samples)
+    ]
     return X, y
 
 
+def _hr(title: str = "", width: int = 56) -> None:
+    if title:
+        pad = max(0, width - len(title) - 4)
+        print(f"\n── {title} {'─' * pad}")
+    else:
+        print("─" * width)
+
+
 # ---------------------------------------------------------------------------
-# Demo
+# Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    args = sys.argv[1:]
+    # ── 1. Generate data ───────────────────────────────────────────────
+    _hr("1. Generate synthetic dataset")
 
-    if len(args) >= 1:
-        # CSV mode: last column is the target
-        path = args[0]
-        test_ratio = float(args[1]) if len(args) >= 2 else 0.2
-        has_header = True
-        print(f"Loading {path} ...")
-        X, y = load_csv(path, has_header=has_header)
-        print(f"  {len(X)} rows, {len(X[0])} features")
-    else:
-        # Generated-dataset demo
-        print("No CSV specified - generating a synthetic dataset.")
-        X, y = generate_dataset(n_samples=500, n_features=3, noise=2.0, seed=42)
-        print(f"  {len(X)} rows, {len(X[0])} features")
-        print("  true weights = [3.5, -2.0, 1.0], bias = 5.0")
+    TRUE_WEIGHTS = [3.0, -1.5, 2.8, 0.7]
+    TRUE_BIAS    = 5.0
+    NOISE_STD    = 2.0
+    N_SAMPLES    = 600
+    N_FEATURES   = len(TRUE_WEIGHTS)
+    CSV_PATH     = "_linreg_demo_data.csv"
 
-    # Holdout split
-    X_train, y_train, X_test, y_test = train_test_split(
-        X, y, test_ratio=0.2, seed=42
+    X, y = _generate_dataset(
+        n_samples=N_SAMPLES,
+        true_weights=TRUE_WEIGHTS,
+        true_bias=TRUE_BIAS,
+        noise_std=NOISE_STD,
+        seed=42,
     )
-    print(f"  Train: {len(X_train)}   Test: {len(X_test)}")
+    print(f"  samples  : {N_SAMPLES}")
+    print(f"  features : {N_FEATURES}")
+    print(f"  true w   : {TRUE_WEIGHTS}")
+    print(f"  true b   : {TRUE_BIAS}")
 
-    # Standardise features (fit on train only, apply to both)
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
+    # ── 2. CSV round-trip ──────────────────────────────────────────────
+    _hr("2. CSV save → load")
 
-    # Train
-    lr = 0.01
-    n_epochs = 2000
-    print(f"\nTraining: lr={lr}, epochs={n_epochs}")
-    model = LinearRegressionGD(learning_rate=lr, n_epochs=n_epochs)
-    model.fit(X_train_s, y_train)
+    feature_names = [f"feature_{i}" for i in range(N_FEATURES)]
+    save_csv(CSV_PATH, X, y, feature_names=feature_names, target_name="target")
+    print(f"  saved  → {CSV_PATH}")
 
-    if model.converged:
-        print(f"  Converged after {len(model.loss_history)} epochs")
-    else:
-        print(f"  Ran all {len(model.loss_history)} epochs "
-              f"({'converged' if model.converged else 'not converged'})")
+    X_loaded, y_loaded, fnames = load_csv(CSV_PATH)
+    print(f"  loaded ← {len(X_loaded)} rows × {len(X_loaded[0])} features")
+    print(f"  cols   : {fnames + ['target']}")
 
-    print(f"  Initial loss: {model.loss_history[0]:.6f}")
-    print(f"  Final loss:   {model.loss_history[-1]:.6f}")
+    # ── 3. Train / test split ──────────────────────────────────────────
+    _hr("3. Train / test split  (80 / 20)")
 
-    # Evaluate on holdout
-    r2, rmse = model.score(X_test_s, y_test)
-    print(f"\nHoldout metrics:")
-    print(f"  R^2:   {r2:.6f}")
-    print(f"  RMSE:  {rmse:.6f}")
-
-    # Learned coefficients (standardised space)
-    print(f"\nLearned weights (standardised space):")
-    print(f"  bias  = {model.weights[0]:.4f}")
-    for j, w in enumerate(model.weights[1:]):
-        print(f"  w[{j}]  = {w:.4f}")
-
-    # Recover coefficients in the original feature scale
-    orig_w = [model.weights[j + 1] / scaler.stds[j] for j in range(len(scaler.stds))]
-    orig_b = (
-        model.weights[0]
-        - sum(
-            model.weights[j + 1] * scaler.means[j] / scaler.stds[j]
-            for j in range(len(scaler.stds))
-        )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_loaded, y_loaded, test_size=0.2, seed=0
     )
-    print(f"\nRecovered weights (original scale):")
-    print(f"  bias  = {orig_b:.4f}")
-    for j, w in enumerate(orig_w):
-        print(f"  w[{j}]  = {w:.4f}")
+    print(f"  train : {len(X_train)} samples")
+    print(f"  test  : {len(X_test)} samples")
+
+    # ── 4. Fit ─────────────────────────────────────────────────────────
+    _hr("4. Gradient descent  (lr=0.05, 2 000 epochs)")
+
+    model = LinearRegression(
+        learning_rate=0.05,
+        n_epochs=2_000,
+        standardize=True,
+        verbose=400,
+    )
+    model.fit(X_train, y_train)
+
+    # ── 5. Metrics ─────────────────────────────────────────────────────
+    _hr("5. Metrics on holdout set")
+
+    m_train = model.evaluate(X_train, y_train)
+    m_test  = model.evaluate(X_test,  y_test)
+
+    col = 14
+    print(f"  {'metric':<8}  {'train':>{col}}  {'test':>{col}}")
+    print(f"  {'──────':<8}  {'─────':>{col}}  {'────':>{col}}")
+    for key in ("rmse", "r2", "mse"):
+        label = "R²" if key == "r2" else key.upper()
+        print(f"  {label:<8}  {m_train[key]:>{col}.5f}  {m_test[key]:>{col}.5f}")
+
+    # ── 6. Learned parameters ──────────────────────────────────────────
+    _hr("6. Learned vs. true parameters")
+
+    print(f"  {'param':<10}  {'learned':>10}  {'true':>10}")
+    print(f"  {'─────':<10}  {'───────':>10}  {'────':>10}")
+    print(f"  {'bias':<10}  {model.intercept_:>10.4f}  {TRUE_BIAS:>10.4f}")
+    for i, (learned, true) in enumerate(zip(model.coef_, TRUE_WEIGHTS)):
+        print(f"  {'w[' + str(i) + ']':<10}  {learned:>10.4f}  {true:>10.4f}")
+
+    # ── 7. Loss curve ──────────────────────────────────────────────────
+    _hr("7. Loss curve (sampled)")
+
+    history = model.loss_history_
+    n_hist  = len(history)
+    n_steps = 10
+    step    = max(1, n_hist // n_steps)
+
+    print(f"  {'epoch':>6}  {'MSE loss':>12}")
+    print(f"  {'─────':>6}  {'────────':>12}")
+    for i in range(0, n_hist, step):
+        print(f"  {i + 1:>6}  {history[i]:>12.6f}")
+    # always show the final epoch
+    if (n_hist - 1) % step != 0:
+        print(f"  {n_hist:>6}  {history[-1]:>12.6f}")
+
+    # ── cleanup ────────────────────────────────────────────────────────
+    try:
+        os.remove(CSV_PATH)
+    except OSError:
+        pass
+
+    _hr()
+    print("  Done.\n")
 
 
 if __name__ == "__main__":

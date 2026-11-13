@@ -1,0 +1,21 @@
+{
+ "id": "cpp-lru",
+ "lang": "cpp",
+ "domain": "data-structures",
+ "cls": "code",
+ "v": "cpp",
+ "ask": "C++17, header-only. lru.hpp and test.cpp: LRU cache template LRU<K,V> with capacity, get/put/erase/size, std::list + std::unordered_map, move semantics. test.cpp exercises eviction order, updates, and a 10000-entry stress loop with a small assert harness. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 7979,
+ "files": {
+  "lru.hpp": "#pragma once\n\n// LRU<K, V> \u2014 header-only, C++17\n// Policy: front of list = MRU, back = LRU.\n// get/put are O(1) average via unordered_map + splice.\n\n#include <list>\n#include <optional>\n#include <stdexcept>\n#include <unordered_map>\n#include <utility>\n\ntemplate <typename K, typename V>\nclass LRU {\npublic:\n    explicit LRU(std::size_t capacity) : cap_(capacity) {\n        if (capacity == 0)\n            throw std::invalid_argument(\"LRU capacity must be > 0\");\n        map_.reserve(capacity);\n    }\n\n    // Non-copyable (iterator stability; copying a whole cache is rarely what you want).\n    LRU(const LRU&) = delete;\n    LRU& operator=(const LRU&) = delete;\n\n    LRU(LRU&&) = default;\n    LRU& operator=(LRU&&) = default;\n\n    ~LRU() = default;\n\n    // Returns a copy of the value and promotes the entry to MRU.\n    // Returns std::nullopt when the key is absent.\n    std::optional<V> get(const K& key) {\n        auto it = map_.find(key);\n        if (it == map_.end())\n            return std::nullopt;\n        list_.splice(list_.begin(), list_, it->second);\n        return it->second->second;  // copy\n    }\n\n    // Insert or update. Accepts the key and value by value so callers can\n    // move into either. On update the new value replaces in-place and the\n    // entry is promoted to MRU. On overflow the LRU entry is evicted first.\n    void put(K key, V value) {\n        auto it = map_.find(key);\n        if (it != map_.end()) {\n            it->second->second = std::move(value);\n            list_.splice(list_.begin(), list_, it->second);\n            return;\n        }\n\n        // Evict before inserting so the map never exceeds cap_.\n        if (map_.size() == cap_) {\n            map_.erase(list_.back().first);\n            list_.pop_back();\n        }\n\n        // key is copied into the list node; the same key is then moved into\n        // the map to avoid a second copy.\n        list_.emplace_front(key, std::move(value));\n        map_.emplace(std::move(key), list_.begin());\n    }\n\n    // Removes the entry for key. Returns true if an entry was erased.\n    bool erase(const K& key) {\n        auto it = map_.find(key);\n        if (it == map_.end())\n            return false;\n        list_.erase(it->second);\n        map_.erase(it);\n        return true;\n    }\n\n    std::size_t size()     const noexcept { return map_.size(); }\n    std::size_t capacity() const noexcept { return cap_; }\n    bool        empty()    const noexcept { return map_.empty(); }\n\nprivate:\n    using Entry   = std::pair<K, V>;\n    using List    = std::list<Entry>;\n    using ListIt  = typename List::iterator;\n    using HashMap = std::unordered_map<K, ListIt>;\n\n    std::size_t cap_;\n    List        list_;   // front = MRU, back = LRU\n    HashMap     map_;\n};\n"
+ },
+ "prose": "",
+ "secs": 37.0
+}

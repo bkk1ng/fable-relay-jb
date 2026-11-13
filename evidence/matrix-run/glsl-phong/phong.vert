@@ -1,28 +1,29 @@
 #version 330 core
 
-// ---- per-vertex inputs ----------------------------------------------
-layout(location = 0) in vec3 aPosition;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
+// ── Vertex attributes ─────────────────────────────────────────────────────────
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_texCoord;
 
-// ---- transforms -----------------------------------------------------
-uniform mat4 uModel;
-uniform mat4 uView;
-uniform mat4 uProjection;
-uniform mat3 uNormalMatrix;   // transpose(inverse(mat3(uModel)))
+// ── Transforms ───────────────────────────────────────────────────────────────
+uniform mat4 u_model;
+uniform mat4 u_view;
+uniform mat4 u_projection;
+// transpose(inverse(mat3(u_model))) — corrects non-uniform scale on normals
+uniform mat3 u_normalMatrix;
 
-// ---- outputs to fragment stage --------------------------------------
-out vec3 vFragPos;    // world-space fragment position
-out vec3 vNormal;     // world-space normal (un-normalised; normalise in frag)
-out vec2 vTexCoord;
+// ── To fragment shader ───────────────────────────────────────────────────────
+out vec3 v_fragPos;    // world-space fragment position
+out vec3 v_normal;     // world-space normal (normalised)
+out vec2 v_texCoord;
 
 void main()
 {
-    vec4 worldPos = uModel * vec4(aPosition, 1.0);
+    vec4 worldPos = u_model * vec4(a_position, 1.0);
 
-    vFragPos  = worldPos.xyz;
-    vNormal   = uNormalMatrix * aNormal;
-    vTexCoord = aTexCoord;
+    v_fragPos  = worldPos.xyz;
+    v_normal   = normalize(u_normalMatrix * a_normal);
+    v_texCoord = a_texCoord;
 
-    gl_Position = uProjection * uView * worldPos;
+    gl_Position = u_projection * u_view * worldPos;
 }

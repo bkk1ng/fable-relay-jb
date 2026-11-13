@@ -1,9 +1,11 @@
 #pragma once
 
-// LRU<K, V> — header-only, C++17
-// Policy: front of list = MRU, back = LRU.
-// get/put are O(1) average via unordered_map + splice.
+// lru.hpp — header-only LRU cache, C++17
+// LRU<K,V>  capacity-bounded cache.
+//   list front = most-recently-used, back = least-recently-used.
+//   map  key → list iterator for O(1) lookup + splice.
 
+#include <cstddef>
 #include <list>
 #include <optional>
 #include <stdexcept>
@@ -12,76 +14,65 @@
 
 template <typename K, typename V>
 class LRU {
+    using Entry = std::pair<K, V>;
+    using List  = std::list<Entry>;
+    using Map   = std::unordered_map<K, typename List::iterator>;
+
 public:
-    explicit LRU(std::size_t capacity) : cap_(capacity) {
+    // capacity must be >= 1
+    explicit LRU(std::size_t capacity) : capacity_(capacity) {
         if (capacity == 0)
             throw std::invalid_argument("LRU capacity must be > 0");
-        map_.reserve(capacity);
     }
 
-    // Non-copyable (iterator stability; copying a whole cache is rarely what you want).
-    LRU(const LRU&) = delete;
+    LRU(const LRU&)            = delete;
     LRU& operator=(const LRU&) = delete;
+    LRU(LRU&&)                 = default;
+    LRU& operator=(LRU&&)      = default;
 
-    LRU(LRU&&) = default;
-    LRU& operator=(LRU&&) = default;
-
-    ~LRU() = default;
-
-    // Returns a copy of the value and promotes the entry to MRU.
-    // Returns std::nullopt when the key is absent.
-    std::optional<V> get(const K& key) {
+    // Returns pointer to the cached value, or nullptr on miss.
+    // Marks the entry as most-recently-used on hit.
+    V* get(const K& key) {
         auto it = map_.find(key);
-        if (it == map_.end())
-            return std::nullopt;
+        if (it == map_.end()) return nullptr;
         list_.splice(list_.begin(), list_, it->second);
-        return it->second->second;  // copy
+        return &it->second->second;
     }
 
-    // Insert or update. Accepts the key and value by value so callers can
-    // move into either. On update the new value replaces in-place and the
-    // entry is promoted to MRU. On overflow the LRU entry is evicted first.
+    // Insert or update.  On insert when at capacity, evicts the LRU entry.
     void put(K key, V value) {
         auto it = map_.find(key);
         if (it != map_.end()) {
+            // update in place and promote to MRU
             it->second->second = std::move(value);
             list_.splice(list_.begin(), list_, it->second);
             return;
         }
-
-        // Evict before inserting so the map never exceeds cap_.
-        if (map_.size() == cap_) {
-            map_.erase(list_.back().first);
+        if (map_.size() == capacity_) {
+            // evict least-recently-used (back of list)
+            const K& lru_key = list_.back().first;
+            map_.erase(lru_key);
             list_.pop_back();
         }
-
-        // key is copied into the list node; the same key is then moved into
-        // the map to avoid a second copy.
-        list_.emplace_front(key, std::move(value));
-        map_.emplace(std::move(key), list_.begin());
+        list_.emplace_front(std::move(key), std::move(value));
+        map_.emplace(list_.front().first, list_.begin());
     }
 
-    // Removes the entry for key. Returns true if an entry was erased.
+    // Remove a single entry.  Returns true if it was present.
     bool erase(const K& key) {
         auto it = map_.find(key);
-        if (it == map_.end())
-            return false;
+        if (it == map_.end()) return false;
         list_.erase(it->second);
         map_.erase(it);
         return true;
     }
 
     std::size_t size()     const noexcept { return map_.size(); }
-    std::size_t capacity() const noexcept { return cap_; }
+    std::size_t capacity() const noexcept { return capacity_; }
     bool        empty()    const noexcept { return map_.empty(); }
 
 private:
-    using Entry   = std::pair<K, V>;
-    using List    = std::list<Entry>;
-    using ListIt  = typename List::iterator;
-    using HashMap = std::unordered_map<K, ListIt>;
-
-    std::size_t cap_;
+    std::size_t capacity_;
     List        list_;   // front = MRU, back = LRU
-    HashMap     map_;
+    Map         map_;
 };

@@ -1,20 +1,20 @@
 /*
- * vuln.c — classic stack buffer overflow demo
- * C11, x86-64 Linux
+ * vuln.c — classic stack buffer overflow, educational demo
  *
- * Build (disable mitigations for the demo):
- *   gcc -std=c11 -O0 -g \
- *       -fno-stack-protector \
- *       -no-pie \
- *       -z execstack \
- *       -o vuln vuln.c
+ * Compile (stack canary and PIE disabled so the overflow is clean):
+ *   gcc -std=c11 -g -O0 -fno-stack-protector -no-pie -o vuln vuln.c
  *
- * Run:
- *   ./vuln <input>
+ * Enable core dumps before running:
+ *   ulimit -c unlimited          # bash / zsh
+ *   echo core > /proc/sys/kernel/core_pattern   # or leave default
  *
- * The program prints the address of win() so the exploit can build its
- * payload even when ASLR is on (because -no-pie keeps the text segment
- * at a fixed base, but the helper address is printed anyway for clarity).
+ * Stack layout inside vuln() on x86-64 System V ABI:
+ *
+ *   RSP (low) ──► [ buf[0] … buf[63] ]   64 bytes   ← strcpy lands here
+ *                 [ saved RBP         ]    8 bytes
+ *                 [ return address    ]    8 bytes   ← overflow target
+ *
+ * Distance from start of buf to return address = 72 bytes.
  */
 
 #include <stdio.h>
@@ -23,38 +23,30 @@
 
 /* ── target function ──────────────────────────────────────────────────────── */
 
-void win(void)
+/*
+ * win() is the redirect target.  Its address is printed by main() so the
+ * exploit script can parse it even when ASLR is off but the binary is
+ * position-independent (the -no-pie flag removes that concern here).
+ */
+void __attribute__((noinline)) win(void)
 {
-    puts("[+] win() reached — execution redirected successfully.");
+    puts("[+] win() reached — return address overwrite succeeded!");
+    fflush(stdout);
+    _exit(0);
 }
 
 /* ── vulnerable function ──────────────────────────────────────────────────── */
 
 /*
- * Stack frame layout inside vuln() on x86-64 System V ABI:
- *
- *   higher addresses
- *   ┌─────────────────────────┐
- *   │  return address (8 B)   │  ← overwrite target
- *   ├─────────────────────────┤
- *   │  saved RBP      (8 B)   │
- *   ├─────────────────────────┤
- *   │  buf[64]                │  ← strcpy writes here, no bounds check
- *   └─────────────────────────┘
- *   lower addresses
- *
- * Total padding to reach the return address: 64 + 8 = 72 bytes.
+ * strcpy has no length limit, so any input longer than 63 bytes overflows
+ * buf and walks up the stack, clobbering saved RBP at +64 and the return
+ * address at +72.
  */
-static void vuln(const char *arg)
+static void __attribute__((noinline)) vuln(const char *arg)
 {
     char buf[64];
-
-    printf("[i] buf  @ %p\n", (void *)buf);
-
-    /* !! intentionally unsafe — do not use strcpy in real code !! */
-    strcpy(buf, arg);
-
-    printf("[i] buf contains: %.64s\n", buf);
+    strcpy(buf, arg);           /* ← intentional overflow; never do this */
+    printf("[*] buf = %.64s\n", buf);
 }
 
 /* ── entry point ──────────────────────────────────────────────────────────── */
@@ -63,14 +55,19 @@ int main(int argc, char *argv[])
 {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <input>\n", argv[0]);
-        return EXIT_FAILURE;
+        return 1;
     }
 
-    /* Print the marker address so exploit.py can parse it. */
-    printf("[i] win() @ %p\n", (void *)win);
+    /*
+     * Print the address of win() so the exploit can read it from stdout
+     * rather than hard-coding it.  With -no-pie the address is fixed across
+     * runs, but reading it here keeps the technique general.
+     */
+    printf("[*] win() @ %p\n", (void *)win);
+    fflush(stdout);
 
     vuln(argv[1]);
 
-    puts("[i] returned normally (no overflow occurred).");
-    return EXIT_SUCCESS;
+    puts("[*] returned normally (no overflow)");
+    return 0;
 }

@@ -1,323 +1,341 @@
-// Typed event emitter with wildcard support and isolated listener errors.
-// No runtime dependencies — TypeScript strict mode compatible.
-
-/** Symbol used to register wildcard listeners that fire on every event. */
-export const WILDCARD = Symbol("*");
-
 /**
- * Shape of an event map.  Keys are event names (strings), values are the
- * tuple of arguments that the event carries.
+ * emitter.ts — typed event emitter
+ *
+ * TypeScript strict, zero runtime dependencies.
+ *
+ * Compile:  tsc --strict emitter.ts
+ * Run test: ts-node emitter.ts   (or node emitter.js after compile)
  *
  * Example:
- *   interface AppEvents {
- *     connect:    [host: string, port: number];
- *     disconnect: [];
- *     data:       [payload: Uint8Array];
- *   }
+ *   type Events = { data: [payload: string]; done: [] };
+ *   const ee = new Emitter<Events>();
+ *   ee.on("data", (s) => console.log(s));
+ *   ee.emit("data", "hello");
  */
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+/** Each key maps to a tuple of argument types for that event. */
 export type EventMap = Record<string, unknown[]>;
 
-/** A listener bound to a named event. */
+/** Sentinel key: listeners registered here fire for every emitted event. */
+export const WILDCARD = "*" as const;
+export type Wildcard = typeof WILDCARD;
+
+/** Listener for a specific named event. */
 export type Listener<Args extends unknown[]> = (...args: Args) => void;
 
-/** A wildcard listener receives the event name plus its arguments. */
-export type WildcardListener<Map extends EventMap> = <K extends keyof Map & string>(
-  event: K,
-  ...args: Map[K]
-) => void;
+/**
+ * Wildcard listener.
+ * Receives the event name as the first argument, then the event's own arguments.
+ */
+export type WildcardListener = (event: string, ...args: unknown[]) => void;
 
-/** Optional hook called when a listener throws. */
-export type ErrorHandler = (error: unknown, event: string | typeof WILDCARD) => void;
+// Internal alias — the type stored in the untyped collections.
+type AnyListener = (...args: unknown[]) => void;
 
-export interface EmitterOptions {
-  /** Called instead of swallowing errors silently. */
-  onError?: ErrorHandler;
+// ── Error isolation helper ────────────────────────────────────────────────────
+
+/**
+ * Re-throws `err` after the current call stack has unwound so that a single
+ * listener failure cannot prevent subsequent listeners from running.
+ */
+function deferThrow(err: unknown): void {
+  Promise.resolve().then(() => {
+    throw err;
+  });
 }
 
-// ─── Internal storage ────────────────────────────────────────────────────────
+// ── Emitter ──────────────────────────────────────────────────────────────────
 
-interface ListenerEntry<Args extends unknown[]> {
-  fn: Listener<Args>;
-  once: boolean;
-}
+/**
+ * A fully typed event emitter.
+ *
+ * @template Events  Object whose keys are event names and whose values are
+ *   tuples describing argument types, e.g. `{ ping: [id: number] }`.
+ */
+export class Emitter<Events extends EventMap> {
+  /** Named event → ordered listener list. */
+  private readonly _named = new Map<string, AnyListener[]>();
 
-interface WildcardEntry<Map extends EventMap> {
-  fn: WildcardListener<Map>;
-  once: boolean;
-}
+  /** Named event → set of listeners registered with `once`. */
+  private readonly _once = new Map<string, Set<AnyListener>>();
 
-// ─── TypedEmitter ─────────────────────────────────────────────────────────────
+  /** Wildcard listeners, in registration order. */
+  private readonly _wild: WildcardListener[] = [];
 
-export class TypedEmitter<Map extends EventMap> {
-  private readonly _listeners = new Map<
-    keyof Map & string,
-    ListenerEntry<Map[keyof Map & string]>[]
-  >();
+  /** Subset of `_wild` registered with `once`. */
+  private readonly _onceWild = new Set<WildcardListener>();
 
-  private readonly _wildcards: WildcardEntry<Map>[] = [];
-  private readonly _onError: ErrorHandler | undefined;
-
-  constructor(options: EmitterOptions = {}) {
-    this._onError = options.onError;
-  }
-
-  // ── on ──────────────────────────────────────────────────────────────────────
+  // ── on ────────────────────────────────────────────────────────────────────
 
   /** Register a persistent listener for a named event. */
-  on<K extends keyof Map & string>(event: K, fn: Listener<Map[K]>): this;
-  /** Register a persistent wildcard listener (fires on every event). */
-  on(event: typeof WILDCARD, fn: WildcardListener<Map>): this;
-  on<K extends keyof Map & string>(
-    event: K | typeof WILDCARD,
-    fn: Listener<Map[K]> | WildcardListener<Map>,
-  ): this {
+  on<K extends keyof Events & string>(
+    event: K,
+    listener: Listener<Events[K]>,
+  ): this;
+  /** Register a persistent wildcard listener (fires for every event). */
+  on(event: Wildcard, listener: WildcardListener): this;
+  on(event: string, listener: AnyListener): this {
     if (event === WILDCARD) {
-      this._wildcards.push({ fn: fn as WildcardListener<Map>, once: false });
+      this._wild.push(listener as WildcardListener);
     } else {
-      this._getOrCreate(event as K).push({
-        fn: fn as Listener<Map[K]>,
-        once: false,
-      });
+      let list = this._named.get(event);
+      if (!list) {
+        list = [];
+        this._named.set(event, list);
+      }
+      list.push(listener);
     }
     return this;
   }
 
-  // ── once ────────────────────────────────────────────────────────────────────
+  // ── once ──────────────────────────────────────────────────────────────────
 
   /** Register a one-shot listener for a named event. */
-  once<K extends keyof Map & string>(event: K, fn: Listener<Map[K]>): this;
+  once<K extends keyof Events & string>(
+    event: K,
+    listener: Listener<Events[K]>,
+  ): this;
   /** Register a one-shot wildcard listener. */
-  once(event: typeof WILDCARD, fn: WildcardListener<Map>): this;
-  once<K extends keyof Map & string>(
-    event: K | typeof WILDCARD,
-    fn: Listener<Map[K]> | WildcardListener<Map>,
-  ): this {
+  once(event: Wildcard, listener: WildcardListener): this;
+  once(event: string, listener: AnyListener): this {
     if (event === WILDCARD) {
-      this._wildcards.push({ fn: fn as WildcardListener<Map>, once: true });
+      this._wild.push(listener as WildcardListener);
+      this._onceWild.add(listener as WildcardListener);
     } else {
-      this._getOrCreate(event as K).push({
-        fn: fn as Listener<Map[K]>,
-        once: true,
-      });
+      let list = this._named.get(event);
+      if (!list) {
+        list = [];
+        this._named.set(event, list);
+      }
+      list.push(listener);
+
+      let set = this._once.get(event);
+      if (!set) {
+        set = new Set();
+        this._once.set(event, set);
+      }
+      set.add(listener);
     }
     return this;
   }
 
-  // ── off ─────────────────────────────────────────────────────────────────────
+  // ── off ───────────────────────────────────────────────────────────────────
 
   /** Remove a specific listener from a named event. */
-  off<K extends keyof Map & string>(event: K, fn: Listener<Map[K]>): this;
+  off<K extends keyof Events & string>(
+    event: K,
+    listener: Listener<Events[K]>,
+  ): this;
   /** Remove a specific wildcard listener. */
-  off(event: typeof WILDCARD, fn: WildcardListener<Map>): this;
-  off<K extends keyof Map & string>(
-    event: K | typeof WILDCARD,
-    fn: Listener<Map[K]> | WildcardListener<Map>,
-  ): this {
+  off(event: Wildcard, listener: WildcardListener): this;
+  off(event: string, listener: AnyListener): this {
     if (event === WILDCARD) {
-      const idx = this._wildcards.findIndex((e) => e.fn === fn);
-      if (idx !== -1) this._wildcards.splice(idx, 1);
+      const idx = this._wild.indexOf(listener as WildcardListener);
+      if (idx !== -1) this._wild.splice(idx, 1);
+      this._onceWild.delete(listener as WildcardListener);
     } else {
-      const bucket = this._listeners.get(event as K);
-      if (!bucket) return this;
-      const idx = bucket.findIndex((e) => e.fn === fn);
-      if (idx !== -1) bucket.splice(idx, 1);
+      const list = this._named.get(event);
+      if (list) {
+        const idx = list.indexOf(listener);
+        if (idx !== -1) list.splice(idx, 1);
+      }
+      this._once.get(event)?.delete(listener);
     }
     return this;
   }
 
-  // ── emit ────────────────────────────────────────────────────────────────────
+  // ── emit ──────────────────────────────────────────────────────────────────
 
   /**
-   * Emit a named event.  Every listener is called even if a previous one
-   * threw; errors are forwarded to `onError` (if provided) or swallowed.
+   * Emit an event, invoking all matching listeners.
+   *
+   * Listener errors are caught and re-thrown asynchronously so that every
+   * listener in the batch is called regardless of whether a previous one threw.
+   *
+   * @returns `true` if at least one listener was invoked.
    */
-  emit<K extends keyof Map & string>(event: K, ...args: Map[K]): boolean {
-    const bucket = this._listeners.get(event);
-    let handled = false;
+  emit<K extends keyof Events & string>(event: K, ...args: Events[K]): boolean {
+    const rawArgs = args as unknown[];
 
-    if (bucket && bucket.length > 0) {
-      handled = true;
-      // Snapshot so mutations during iteration are safe.
-      const snapshot = bucket.slice();
-      const surviving: typeof bucket = [];
+    // Snapshots prevent mutation-during-iteration bugs.
+    const named = this._named.get(event)?.slice() ?? [];
+    const once  = this._once.get(event);
+    const wilds = this._wild.slice();
 
-      for (const entry of snapshot) {
-        this._invoke(entry.fn, args, event);
-        if (!entry.once) surviving.push(entry);
+    // Named listeners.
+    for (const fn of named) {
+      try {
+        fn(...rawArgs);
+      } catch (err) {
+        deferThrow(err);
       }
-
-      // Replace in-place, keeping entries added during iteration.
-      bucket.splice(0, snapshot.length, ...surviving);
-    }
-
-    if (this._wildcards.length > 0) {
-      handled = true;
-      const snapshot = this._wildcards.slice();
-      const surviving: typeof this._wildcards = [];
-
-      for (const entry of snapshot) {
-        this._invokeWildcard(entry.fn, event, args);
-        if (!entry.once) surviving.push(entry);
-      }
-
-      this._wildcards.splice(0, snapshot.length, ...surviving);
-    }
-
-    return handled;
-  }
-
-  // ── listenerCount ───────────────────────────────────────────────────────────
-
-  /** Count listeners for a named event (excludes wildcards). */
-  listenerCount<K extends keyof Map & string>(event: K): number;
-  /** Count wildcard listeners. */
-  listenerCount(event: typeof WILDCARD): number;
-  listenerCount<K extends keyof Map & string>(event: K | typeof WILDCARD): number {
-    if (event === WILDCARD) return this._wildcards.length;
-    return this._listeners.get(event as K)?.length ?? 0;
-  }
-
-  // ── private helpers ─────────────────────────────────────────────────────────
-
-  private _getOrCreate<K extends keyof Map & string>(
-    event: K,
-  ): ListenerEntry<Map[K]>[] {
-    let bucket = this._listeners.get(event) as
-      | ListenerEntry<Map[K]>[]
-      | undefined;
-    if (!bucket) {
-      bucket = [];
-      this._listeners.set(event, bucket as ListenerEntry<Map[keyof Map & string]>[]);
-    }
-    return bucket;
-  }
-
-  private _invoke<Args extends unknown[]>(
-    fn: Listener<Args>,
-    args: Args,
-    event: string,
-  ): void {
-    try {
-      fn(...args);
-    } catch (err) {
-      if (this._onError) {
-        try {
-          this._onError(err, event);
-        } catch {
-          // swallow errors from the error handler itself
-        }
+      // Remove one-shot listeners after their first invocation.
+      if (once?.has(fn)) {
+        once.delete(fn);
+        this._spliceNamed(event, fn);
       }
     }
-  }
 
-  private _invokeWildcard<K extends keyof Map & string>(
-    fn: WildcardListener<Map>,
-    event: K,
-    args: Map[K],
-  ): void {
-    try {
-      fn(event, ...args);
-    } catch (err) {
-      if (this._onError) {
-        try {
-          this._onError(err, WILDCARD);
-        } catch {
-          // swallow
-        }
+    // Wildcard listeners.
+    for (const fn of wilds) {
+      try {
+        fn(event, ...rawArgs);
+      } catch (err) {
+        deferThrow(err);
+      }
+      if (this._onceWild.has(fn)) {
+        this._onceWild.delete(fn);
+        const idx = this._wild.indexOf(fn);
+        if (idx !== -1) this._wild.splice(idx, 1);
       }
     }
+
+    return named.length > 0 || wilds.length > 0;
+  }
+
+  // ── listenerCount ─────────────────────────────────────────────────────────
+
+  /** Returns the number of listeners registered for the given event (or wildcard). */
+  listenerCount(event: (keyof Events & string) | Wildcard): number {
+    if ((event as string) === WILDCARD) return this._wild.length;
+    return this._named.get(event as string)?.length ?? 0;
+  }
+
+  // ── private helpers ───────────────────────────────────────────────────────
+
+  private _spliceNamed(event: string, fn: AnyListener): void {
+    const list = this._named.get(event);
+    if (!list) return;
+    const idx = list.indexOf(fn);
+    if (idx !== -1) list.splice(idx, 1);
   }
 }
 
-// ─── Self-test (__main__) ─────────────────────────────────────────────────────
+// ── Self-test ─────────────────────────────────────────────────────────────────
+// Run directly:  ts-node emitter.ts
+// Requires @types/node for the `require` / `module` globals.
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  interface TestEvents {
-    greet:      [name: string];
-    count:      [n: number];
-    noArgs:     [];
+if (typeof require !== "undefined" && typeof module !== "undefined" && require.main === module) {
+  type TestEvents = {
+    greet: [name: string];
+    ping:  [id: number, ts: number];
+    done:  [];
+  };
+
+  let passed = 0;
+  let failed = 0;
+
+  function assert(label: string, condition: boolean): void {
+    if (condition) {
+      console.log(`  ✓ ${label}`);
+      passed++;
+    } else {
+      console.error(`  ✗ ${label}`);
+      failed++;
+    }
   }
 
-  const errors: string[] = [];
+  const ee = new Emitter<TestEvents>();
 
-  const emitter = new TypedEmitter<TestEvents>({
-    onError(err, event) {
-      errors.push(`[${String(event)}] ${String(err)}`);
-    },
-  });
+  // ── basic on / emit / off ───────────────────────────────────────────────
 
-  // ── Basic on/emit ──────────────────────────────────────────────────────────
+  console.log("\non / emit / off");
+
   const received: string[] = [];
-  emitter.on("greet", (name) => received.push(`hello ${name}`));
-  emitter.emit("greet", "world");
-  emitter.emit("greet", "TypeScript");
-  console.assert(
-    received.join(",") === "hello world,hello TypeScript",
-    `on/emit failed: ${received}`,
-  );
+  const greetFn: Listener<[string]> = (name) => { received.push(name); };
 
-  // ── once ──────────────────────────────────────────────────────────────────
+  ee.on("greet", greetFn);
+  ee.emit("greet", "alice");
+  ee.emit("greet", "bob");
+  assert("two emits → two receives",        received.length === 2);
+  assert("first payload",                   received[0] === "alice");
+  assert("second payload",                  received[1] === "bob");
+  assert("listenerCount after on",          ee.listenerCount("greet") === 1);
+
+  ee.off("greet", greetFn);
+  ee.emit("greet", "carol");
+  assert("no call after off",               received.length === 2);
+  assert("listenerCount after off",         ee.listenerCount("greet") === 0);
+
+  // ── once ───────────────────────────────────────────────────────────────
+
+  console.log("\nonce");
+
   let onceFired = 0;
-  emitter.once("count", () => onceFired++);
-  emitter.emit("count", 1);
-  emitter.emit("count", 2);
-  console.assert(onceFired === 1, `once fired ${onceFired} times, expected 1`);
+  ee.once("done", () => { onceFired++; });
+  assert("listenerCount before first emit", ee.listenerCount("done") === 1);
+  ee.emit("done");
+  assert("fired once",                      onceFired === 1);
+  assert("listenerCount after first emit",  ee.listenerCount("done") === 0);
+  ee.emit("done");
+  assert("did not fire a second time",      onceFired === 1);
 
-  // ── off ───────────────────────────────────────────────────────────────────
-  let offCount = 0;
-  const offFn = () => offCount++;
-  emitter.on("noArgs", offFn);
-  emitter.emit("noArgs");
-  emitter.off("noArgs", offFn);
-  emitter.emit("noArgs");
-  console.assert(offCount === 1, `off failed: handler called ${offCount} times`);
+  // ── multiple listeners ─────────────────────────────────────────────────
 
-  // ── listenerCount ─────────────────────────────────────────────────────────
-  const countEmitter = new TypedEmitter<TestEvents>();
-  countEmitter.on("greet", () => {});
-  countEmitter.on("greet", () => {});
-  console.assert(
-    countEmitter.listenerCount("greet") === 2,
-    `listenerCount wrong: ${countEmitter.listenerCount("greet")}`,
-  );
+  console.log("\nmultiple listeners");
 
-  // ── wildcard ──────────────────────────────────────────────────────────────
+  const order: number[] = [];
+  ee.on("ping", () => { order.push(1); });
+  ee.on("ping", () => { order.push(2); });
+  ee.on("ping", () => { order.push(3); });
+  ee.emit("ping", 0, 0);
+  assert("all three called",                order.length === 3);
+  assert("called in registration order",    order.join(",") === "1,2,3");
+  assert("listenerCount = 3",               ee.listenerCount("ping") === 3);
+
+  // ── wildcard ───────────────────────────────────────────────────────────
+
+  console.log("\nwildcard");
+
   const wildEvents: string[] = [];
-  emitter.on(WILDCARD, (event) => wildEvents.push(event));
-  emitter.emit("greet", "wildcard-test");
-  emitter.emit("noArgs");
-  console.assert(
-    wildEvents.includes("greet") && wildEvents.includes("noArgs"),
-    `wildcard missed events: ${wildEvents}`,
-  );
+  const wildFn: WildcardListener = (ev) => { wildEvents.push(ev); };
+  ee.on(WILDCARD, wildFn);
 
-  // ── wildcard listenerCount ────────────────────────────────────────────────
-  console.assert(
-    emitter.listenerCount(WILDCARD) === 1,
-    `wildcard listenerCount wrong: ${emitter.listenerCount(WILDCARD)}`,
-  );
+  ee.emit("greet", "dave");
+  ee.emit("done");
+  assert("wildcard fired for greet",        wildEvents.includes("greet"));
+  assert("wildcard fired for done",         wildEvents.includes("done"));
+  assert("listenerCount wildcard = 1",      ee.listenerCount(WILDCARD) === 1);
 
-  // ── error isolation ───────────────────────────────────────────────────────
-  const afterThrow: string[] = [];
-  const throwEmitter = new TypedEmitter<TestEvents>({
-    onError(err) {
-      errors.push(String(err));
-    },
-  });
-  throwEmitter.on("greet", () => {
-    throw new Error("boom");
-  });
-  throwEmitter.on("greet", (name) => afterThrow.push(name));
-  throwEmitter.emit("greet", "isolation");
-  console.assert(
-    afterThrow[0] === "isolation",
-    `error isolation failed — second listener did not run`,
-  );
-  console.assert(
-    errors.some((e) => e.includes("boom")),
-    `error not captured: ${errors}`,
-  );
+  ee.off(WILDCARD, wildFn);
+  const countBefore = wildEvents.length;
+  ee.emit("greet", "eve");
+  assert("wildcard silent after off",       wildEvents.length === countBefore);
 
-  console.log("All assertions passed.");
-  console.log("Captured errors (expected):", errors);
+  // ── wildcard once ──────────────────────────────────────────────────────
+
+  console.log("\nwildcard once");
+
+  let wildOnceFired = 0;
+  ee.once(WILDCARD, () => { wildOnceFired++; });
+  ee.emit("done");
+  assert("wildcard once fires once",        wildOnceFired === 1);
+  ee.emit("done");
+  assert("wildcard once silent after",      wildOnceFired === 1);
+
+  // ── error isolation ────────────────────────────────────────────────────
+
+  console.log("\nerror isolation");
+
+  const afterThrow: boolean[] = [];
+  ee.on("done", () => { throw new Error("boom"); });
+  ee.on("done", () => { afterThrow.push(true); });
+  ee.emit("done"); // the Error is re-thrown async; next listener must still run
+  assert("listener after thrower still ran", afterThrow.length === 1);
+
+  // ── emit return value ──────────────────────────────────────────────────
+
+  console.log("\nemit return value");
+
+  const fresh = new Emitter<TestEvents>();
+  assert("no listeners → false",   fresh.emit("greet", "x") === false);
+  fresh.on("greet", () => { /* */ });
+  assert("one listener → true",    fresh.emit("greet", "x") === true);
+
+  // ── summary ────────────────────────────────────────────────────────────
+
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  if (failed > 0) process.exit(1);
 }

@@ -1,440 +1,498 @@
 /*
- * server.c — single-threaded edge-triggered epoll TCP server
+ * server.c — single-threaded epoll (edge-triggered) TCP server, C11, Linux
  *
- * C11 / Linux
- * Features: non-blocking accept loop, ET epoll, per-connection growable
- *           buffers, line-delimited protocol (echo), partial-write output
- *           queue, idle timeout sweep via timerfd, SIGINT/SIGTERM shutdown
- *           via signalfd.
- *
- * Build:
- *   gcc -std=c11 -Wall -Wextra -O2 -o server server.c
- * Run:
- *   ./server 8080
+ * Protocol  : line-delimited; server echoes each line back.
+ * Usage     : ./server <port>
+ * Build     : gcc -std=c11 -O2 -Wall -Wextra -o server server.c
  */
 
 #define _GNU_SOURCE
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <signal.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <time.h>
+#include <unistd.h>
 
-/* ── tunables ───────────────────────────────────────────────────────────── */
-#define MAX_EVENTS       64
-#define INIT_BUF_SIZE    4096u
-#define IDLE_TIMEOUT_S   60          /* close connection after N idle seconds */
-#define SWEEP_INTERVAL_S 10          /* idle-sweep timer period               */
-#define FD_TABLE_SIZE    65536       /* fd→conn map; sized to max fd          */
+/* ── tunables ──────────────────────────────────────────────── */
 
-/* ── per-connection state ───────────────────────────────────────────────── */
-typedef struct conn {
-    int    fd;
-    time_t last_active;
+#define MAX_EVENTS      64
+#define MAX_CONNS       65536       /* fd-indexed table ceiling  */
+#define IBUF_INIT       4096        /* input buffer initial size */
+#define OBUF_INIT       4096        /* output buffer initial size */
+#define IDLE_TIMEOUT_S  60          /* close after N idle seconds */
+#define SWEEP_INTERVAL_S 10         /* idle-sweep timer period    */
+#define LISTEN_BACKLOG  128
 
-    /* input: flat growable buffer */
-    char  *ibuf;
-    size_t ilen;        /* bytes consumed */
-    size_t icap;        /* allocated capacity */
+/* ── per-connection state ──────────────────────────────────── */
 
-    /* output: growable buffer + drain cursor */
-    char  *obuf;
-    size_t ooff;        /* index of next byte to write */
-    size_t olen;        /* bytes remaining from ooff   */
-    size_t ocap;        /* allocated capacity           */
+typedef struct {
+    int     fd;
+    time_t  last_active;
+
+    /* input (read-side) growable buffer */
+    char   *ibuf;
+    size_t  ibuf_len;   /* bytes stored */
+    size_t  ibuf_cap;   /* allocated capacity */
+
+    /* output queue; pending bytes = [obuf_off, obuf_len) */
+    char   *obuf;
+    size_t  obuf_len;   /* bytes appended */
+    size_t  obuf_off;   /* bytes already written */
+    size_t  obuf_cap;   /* allocated capacity */
 } conn_t;
 
-/* ── globals ────────────────────────────────────────────────────────────── */
-static conn_t *fd_table[FD_TABLE_SIZE];
-static int     epfd        = -1;
-static int     srvfd       = -1;
-static int     sigfd       = -1;
-static int     tfd         = -1;   /* timerfd for idle sweep */
-static bool    running     = true;
+/* ── globals ───────────────────────────────────────────────── */
 
-/*
- * We store three special fds in epoll alongside conn_t pointers.
- * Use small sentinel values that malloc will never return.
- */
-#define TAG_SERVER ((void *)(uintptr_t)1)
-#define TAG_SIGNAL ((void *)(uintptr_t)2)
-#define TAG_TIMER  ((void *)(uintptr_t)3)
+static conn_t  *conns[MAX_CONNS];   /* NULL if slot unused */
+static int      epfd    = -1;
+static int      running = 1;
 
-/* ── epoll helpers ──────────────────────────────────────────────────────── */
-static void ep_add(int fd, uint32_t events, void *ptr)
+/* ── epoll arm/rearm helpers ───────────────────────────────── */
+
+static void arm_rd(int fd)
 {
-    struct epoll_event ev = { .events = events, .data.ptr = ptr };
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0)
-        perror("epoll_ctl ADD");
+    struct epoll_event ev = {
+        .events  = EPOLLIN | EPOLLET | EPOLLRDHUP,
+        .data.fd = fd
+    };
+    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
 }
 
-static void ep_mod(int fd, uint32_t events, void *ptr)
+static void arm_rdwr(int fd)
 {
-    struct epoll_event ev = { .events = events, .data.ptr = ptr };
-    if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) < 0)
-        perror("epoll_ctl MOD");
+    struct epoll_event ev = {
+        .events  = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP,
+        .data.fd = fd
+    };
+    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
 }
 
-/* ── connection lifecycle ───────────────────────────────────────────────── */
-static conn_t *conn_new(int fd)
+/* ── connection lifecycle ──────────────────────────────────── */
+
+static conn_t *conn_alloc(int fd)
 {
+    if (fd < 0 || fd >= MAX_CONNS) return NULL;
+
     conn_t *c = calloc(1, sizeof *c);
     if (!c) return NULL;
-    c->fd          = fd;
-    c->last_active = time(NULL);
-    c->ibuf        = malloc(INIT_BUF_SIZE);
-    c->icap        = INIT_BUF_SIZE;
-    c->obuf        = malloc(INIT_BUF_SIZE);
-    c->ocap        = INIT_BUF_SIZE;
+
+    c->ibuf = malloc(IBUF_INIT);
+    c->obuf = malloc(OBUF_INIT);
     if (!c->ibuf || !c->obuf) {
-        free(c->ibuf); free(c->obuf); free(c);
+        free(c->ibuf);
+        free(c->obuf);
+        free(c);
         return NULL;
     }
+
+    c->fd          = fd;
+    c->last_active = time(NULL);
+    c->ibuf_cap    = IBUF_INIT;
+    c->obuf_cap    = OBUF_INIT;
+
+    conns[fd] = c;
     return c;
 }
 
-static void conn_close(conn_t *c)
+static void conn_free(conn_t *c)
 {
-    printf("close   fd=%d\n", c->fd);
+    if (!c) return;
+
     epoll_ctl(epfd, EPOLL_CTL_DEL, c->fd, NULL);
     close(c->fd);
-    fd_table[c->fd] = NULL;
+
+    if (c->fd >= 0 && c->fd < MAX_CONNS)
+        conns[c->fd] = NULL;
+
     free(c->ibuf);
     free(c->obuf);
     free(c);
 }
 
-/* ── output queue ───────────────────────────────────────────────────────── */
+/* ── input buffer ──────────────────────────────────────────── */
 
-/*
- * Slide pending bytes back to the front of the buffer.
- * Called before every append so the capacity check is accurate.
- */
-static void obuf_compact(conn_t *c)
+/* Ensure there is room for at least `need` more bytes. */
+static int ibuf_reserve(conn_t *c, size_t need)
 {
-    if (c->ooff == 0 || c->olen == 0) {
-        c->ooff = 0;
-        return;
-    }
-    memmove(c->obuf, c->obuf + c->ooff, c->olen);
-    c->ooff = 0;
+    if (c->ibuf_len + need <= c->ibuf_cap) return 0;
+
+    size_t newcap = c->ibuf_cap;
+    while (newcap < c->ibuf_len + need) newcap *= 2;
+
+    char *p = realloc(c->ibuf, newcap);
+    if (!p) return -1;
+    c->ibuf     = p;
+    c->ibuf_cap = newcap;
+    return 0;
 }
 
-static bool obuf_append(conn_t *c, const char *data, size_t len)
+/* ── output queue ──────────────────────────────────────────── */
+
+/*
+ * Append `len` bytes to the output queue.
+ * Compacts the buffer first when the drained prefix exceeds half the capacity.
+ */
+static int obuf_append(conn_t *c, const char *data, size_t len)
 {
-    obuf_compact(c);
-    size_t need = c->olen + len;
-    if (need > c->ocap) {
-        size_t newcap = c->ocap;
-        while (newcap < need) newcap *= 2;
+    /* compact: slide unsent bytes to the front */
+    if (c->obuf_off > 0 && c->obuf_off >= c->obuf_cap / 2) {
+        size_t pending = c->obuf_len - c->obuf_off;
+        memmove(c->obuf, c->obuf + c->obuf_off, pending);
+        c->obuf_len = pending;
+        c->obuf_off = 0;
+    }
+
+    if (c->obuf_len + len > c->obuf_cap) {
+        size_t newcap = c->obuf_cap;
+        while (newcap < c->obuf_len + len) newcap *= 2;
         char *p = realloc(c->obuf, newcap);
-        if (!p) return false;
-        c->obuf = p;
-        c->ocap = newcap;
+        if (!p) return -1;
+        c->obuf     = p;
+        c->obuf_cap = newcap;
     }
-    memcpy(c->obuf + c->olen, data, len);
-    c->olen += len;
-    return true;
+
+    memcpy(c->obuf + c->obuf_len, data, len);
+    c->obuf_len += len;
+    return 0;
 }
 
 /*
- * Drain the output buffer until EAGAIN or empty.
- * Returns true when the buffer is fully drained.
+ * Flush as much of the output queue as the kernel will accept.
+ * Arms EPOLLOUT if write() returns EAGAIN (partial write).
+ * Disarms EPOLLOUT once the queue empties.
+ * Returns -1 on unrecoverable write error; 0 otherwise.
  */
-static bool obuf_flush(conn_t *c)
+static int conn_flush(conn_t *c)
 {
-    while (c->olen > 0) {
-        ssize_t n = write(c->fd, c->obuf + c->ooff, c->olen);
+    while (c->obuf_off < c->obuf_len) {
+        ssize_t n = write(c->fd,
+                          c->obuf + c->obuf_off,
+                          c->obuf_len - c->obuf_off);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return false;   /* kernel buffer full; wait for EPOLLOUT */
-            return true;        /* I/O error; caller should close */
+            if (errno == EINTR)                        continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                arm_rdwr(c->fd);   /* wake us when writable again */
+                return 0;
+            }
+            return -1;
         }
-        if (n == 0) return true;
-        c->ooff += (size_t)n;
-        c->olen -= (size_t)n;
+        c->obuf_off += (size_t)n;
     }
-    obuf_compact(c);
-    return true;
+
+    /* queue fully drained — no need for EPOLLOUT anymore */
+    c->obuf_len = 0;
+    c->obuf_off = 0;
+    arm_rd(c->fd);
+    return 0;
+}
+
+/* ── protocol ──────────────────────────────────────────────── */
+
+/*
+ * Called with one complete, NUL-terminated line (CR stripped).
+ * Default behaviour: echo the line back with a trailing newline.
+ * Returns -1 if the connection should be torn down.
+ */
+static int handle_line(conn_t *c, const char *line, size_t len)
+{
+    if (obuf_append(c, line, len) < 0) return -1;
+    if (obuf_append(c, "\n",  1 ) < 0) return -1;
+    return conn_flush(c);
 }
 
 /*
- * Queue data for delivery.
- * When the buffer was previously empty, attempt a direct flush and arm
- * EPOLLOUT only if the kernel buffer fills up.
+ * Scan ibuf for complete lines and dispatch them.
+ * Returns -1 if the connection should be torn down.
  */
-static void conn_send(conn_t *c, const char *data, size_t len)
+static int process_input(conn_t *c)
 {
-    bool was_empty = (c->olen == 0);
-
-    if (!obuf_append(c, data, len)) {
-        conn_close(c);
-        return;
-    }
-
-    if (was_empty) {
-        if (!obuf_flush(c)) {
-            /* Partial write: arm EPOLLOUT to be notified when space frees up */
-            ep_mod(c->fd, EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP, c);
-        }
-        /* Fully drained: EPOLLOUT stays disarmed, nothing to do */
-    }
-    /*
-     * If was_empty == false, EPOLLOUT is already armed from a previous
-     * partial write; the new data will be flushed when that fires.
-     */
-}
-
-/* ── line-delimited protocol ────────────────────────────────────────────── */
-/*
- * Extract and process every complete '\n'-terminated line from the input
- * buffer.  Protocol: echo each line back to the sender.
- */
-static void process_lines(conn_t *c)
-{
-    while (c->ilen > 0) {
-        char *nl = memchr(c->ibuf, '\n', c->ilen);
+    while (c->ibuf_len > 0) {
+        char *nl = memchr(c->ibuf, '\n', c->ibuf_len);
         if (!nl) break;
 
-        size_t line_len = (size_t)(nl - c->ibuf) + 1; /* include '\n' */
-        conn_send(c, c->ibuf, line_len);
+        size_t line_len = (size_t)(nl - c->ibuf);
+        if (line_len > 0 && c->ibuf[line_len - 1] == '\r')
+            line_len--;
 
-        /* Consume the line */
-        size_t remaining = c->ilen - line_len;
-        memmove(c->ibuf, c->ibuf + line_len, remaining);
-        c->ilen = remaining;
+        /* Temporarily NUL-terminate for handle_line */
+        char saved        = c->ibuf[line_len];
+        c->ibuf[line_len] = '\0';
+
+        int rc = handle_line(c, c->ibuf, line_len);
+
+        c->ibuf[line_len] = saved;
+        if (rc < 0) return -1;
+
+        size_t consumed = (size_t)(nl - c->ibuf) + 1;
+        memmove(c->ibuf, c->ibuf + consumed, c->ibuf_len - consumed);
+        c->ibuf_len -= consumed;
     }
+    return 0;
 }
 
-/* ── read handler ───────────────────────────────────────────────────────── */
+/* ── read path ─────────────────────────────────────────────── */
+
 /*
- * Edge-triggered: drain until EAGAIN before returning to epoll_wait.
+ * Edge-triggered: drain the socket completely until EAGAIN.
+ * Returns -1 when the connection should be torn down.
  */
-static void conn_do_read(conn_t *c)
+static int conn_read(conn_t *c)
 {
     for (;;) {
-        /* Grow input buffer when it is full */
-        if (c->ilen == c->icap) {
-            size_t newcap = c->icap * 2;
-            char  *p      = realloc(c->ibuf, newcap);
-            if (!p) { conn_close(c); return; }
-            c->ibuf = p;
-            c->icap = newcap;
-        }
+        if (ibuf_reserve(c, 4096) < 0) return -1;
 
-        ssize_t n = read(c->fd, c->ibuf + c->ilen, c->icap - c->ilen);
+        ssize_t n = read(c->fd,
+                         c->ibuf + c->ibuf_len,
+                         c->ibuf_cap - c->ibuf_len);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                break;  /* fully drained */
-            conn_close(c);
-            return;
+            if (errno == EINTR)                        continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;  /* drained */
+            return -1;
         }
-        if (n == 0) {       /* peer closed connection */
-            conn_close(c);
-            return;
-        }
-        c->ilen        += (size_t)n;
-        c->last_active  = time(NULL);
+        if (n == 0) return -1;  /* clean peer close */
+
+        c->ibuf_len   += (size_t)n;
+        c->last_active = time(NULL);
+
+        if (process_input(c) < 0) return -1;
     }
-    process_lines(c);
+    return 0;
 }
 
-/* ── write handler ──────────────────────────────────────────────────────── */
-static void conn_do_write(conn_t *c)
-{
-    if (obuf_flush(c))
-        ep_mod(c->fd, EPOLLIN | EPOLLET | EPOLLRDHUP, c); /* disarm EPOLLOUT */
-}
+/* ── accept loop ───────────────────────────────────────────── */
 
-/* ── accept loop ────────────────────────────────────────────────────────── */
 /*
- * Edge-triggered on the server socket: drain accept() until EAGAIN.
+ * Edge-triggered listen socket: accept all pending connections
+ * before returning to epoll_wait.
  */
-static void do_accept(void)
+static void drain_accept(int listenfd)
 {
     for (;;) {
-        struct sockaddr_in addr;
-        socklen_t addrlen = sizeof addr;
-        int cfd = accept4(srvfd, (struct sockaddr *)&addr, &addrlen,
-                          SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (cfd < 0) {
+        struct sockaddr_in peer;
+        socklen_t peerlen = sizeof peer;
+
+        int fd = accept4(listenfd,
+                         (struct sockaddr *)&peer, &peerlen,
+                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EINTR)                        continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            if (errno == EINTR)                          continue;
             perror("accept4");
             break;
         }
-        if (cfd >= FD_TABLE_SIZE) {
-            fprintf(stderr, "fd %d exceeds FD_TABLE_SIZE — closing\n", cfd);
-            close(cfd);
+
+        if (fd >= MAX_CONNS) {
+            fprintf(stderr, "fd %d exceeds MAX_CONNS — dropping\n", fd);
+            close(fd);
             continue;
         }
 
-        conn_t *c = conn_new(cfd);
-        if (!c) { close(cfd); continue; }
+        conn_t *c = conn_alloc(fd);
+        if (!c) {
+            close(fd);
+            continue;
+        }
 
-        fd_table[cfd] = c;
-        ep_add(cfd, EPOLLIN | EPOLLET | EPOLLRDHUP, c);
+        struct epoll_event ev = {
+            .events  = EPOLLIN | EPOLLET | EPOLLRDHUP,
+            .data.fd = fd
+        };
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+            perror("epoll_ctl ADD");
+            conn_free(c);
+            continue;
+        }
 
         char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof ip);
-        printf("accept  fd=%d  %s:%u\n", cfd, ip, ntohs(addr.sin_port));
+        inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
+        fprintf(stderr, "connect  fd=%-5d %s:%d\n",
+                fd, ip, ntohs(peer.sin_port));
     }
 }
 
-/* ── idle timeout sweep ─────────────────────────────────────────────────── */
-static void do_idle_sweep(void)
+/* ── idle timeout sweep ────────────────────────────────────── */
+
+static void idle_sweep(void)
 {
     time_t now = time(NULL);
-    for (int i = 0; i < FD_TABLE_SIZE; i++) {
-        conn_t *c = fd_table[i];
+    for (int i = 0; i < MAX_CONNS; i++) {
+        conn_t *c = conns[i];
         if (!c) continue;
-        if (now - c->last_active >= IDLE_TIMEOUT_S) {
-            printf("timeout fd=%d  idle=%lds\n",
-                   c->fd, (long)(now - c->last_active));
-            conn_close(c);
+        if (now - c->last_active > IDLE_TIMEOUT_S) {
+            fprintf(stderr, "idle     fd=%-5d (timeout)\n", c->fd);
+            conn_free(c);
         }
     }
 }
 
-/* ── cleanup ────────────────────────────────────────────────────────────── */
-static void cleanup_all(void)
-{
-    for (int i = 0; i < FD_TABLE_SIZE; i++)
-        if (fd_table[i]) conn_close(fd_table[i]);
-    if (srvfd >= 0) close(srvfd);
-    if (sigfd >= 0) close(sigfd);
-    if (tfd   >= 0) close(tfd);
-    if (epfd  >= 0) close(epfd);
-}
+/* ── main ──────────────────────────────────────────────────── */
 
-/* ── main ───────────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
         return 1;
     }
+
     int port = atoi(argv[1]);
     if (port <= 0 || port > 65535) {
         fprintf(stderr, "invalid port: %s\n", argv[1]);
         return 1;
     }
 
-    /* ── server socket ── */
-    srvfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (srvfd < 0) { perror("socket"); return 1; }
+    /* ── signalfd for SIGINT / SIGTERM ── */
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
+        perror("sigprocmask");
+        return 1;
+    }
+    int sigfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (sigfd < 0) { perror("signalfd"); return 1; }
 
-    int opt = 1;
-    setsockopt(srvfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
+    /* ── timerfd for idle sweep ── */
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd < 0) { perror("timerfd_create"); return 1; }
+    struct itimerspec its = {
+        .it_interval = { .tv_sec = SWEEP_INTERVAL_S, .tv_nsec = 0 },
+        .it_value    = { .tv_sec = SWEEP_INTERVAL_S, .tv_nsec = 0 }
+    };
+    timerfd_settime(tfd, 0, &its, NULL);
 
-    struct sockaddr_in sa = {
+    /* ── listening socket ── */
+    int listenfd = socket(AF_INET,
+                          SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                          0);
+    if (listenfd < 0) { perror("socket"); return 1; }
+
+    int yes = 1;
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof yes);
+
+    struct sockaddr_in addr = {
         .sin_family      = AF_INET,
         .sin_addr.s_addr = INADDR_ANY,
-        .sin_port        = htons((uint16_t)port),
+        .sin_port        = htons((uint16_t)port)
     };
-    if (bind(srvfd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        perror("bind"); return 1;
+    if (bind(listenfd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+        perror("bind");
+        return 1;
     }
-    if (listen(srvfd, SOMAXCONN) < 0) {
-        perror("listen"); return 1;
+    if (listen(listenfd, LISTEN_BACKLOG) < 0) {
+        perror("listen");
+        return 1;
     }
 
     /* ── epoll instance ── */
     epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) { perror("epoll_create1"); return 1; }
 
-    ep_add(srvfd, EPOLLIN | EPOLLET, TAG_SERVER);
+    struct epoll_event ev;
 
-    /* ── signalfd: catch SIGINT and SIGTERM cleanly ── */
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGINT);
-    sigaddset(&mask, SIGTERM);
-    if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
-        perror("sigprocmask"); return 1;
-    }
-    sigfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
-    if (sigfd < 0) { perror("signalfd"); return 1; }
-    ep_add(sigfd, EPOLLIN, TAG_SIGNAL);
+    ev.events  = EPOLLIN | EPOLLET;
+    ev.data.fd = listenfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, listenfd, &ev);
 
-    /* ── timerfd: periodic idle sweep ── */
-    tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (tfd < 0) { perror("timerfd_create"); return 1; }
-    struct itimerspec its = {
-        .it_value    = { .tv_sec = SWEEP_INTERVAL_S },
-        .it_interval = { .tv_sec = SWEEP_INTERVAL_S },
-    };
-    timerfd_settime(tfd, 0, &its, NULL);
-    ep_add(tfd, EPOLLIN, TAG_TIMER);
+    ev.events  = EPOLLIN;
+    ev.data.fd = sigfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sigfd, &ev);
 
-    printf("listening on :%d  (idle timeout %ds, sweep every %ds)\n",
-           port, IDLE_TIMEOUT_S, SWEEP_INTERVAL_S);
+    ev.events  = EPOLLIN;
+    ev.data.fd = tfd;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &ev);
+
+    fprintf(stderr, "listening on port %d  (idle=%ds sweep=%ds)\n",
+            port, IDLE_TIMEOUT_S, SWEEP_INTERVAL_S);
 
     /* ── event loop ── */
     struct epoll_event events[MAX_EVENTS];
+
     while (running) {
-        int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (n < 0) {
+        int nev = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nev < 0) {
             if (errno == EINTR) continue;
             perror("epoll_wait");
             break;
         }
 
-        for (int i = 0; i < n; i++) {
-            void    *ptr     = events[i].data.ptr;
-            uint32_t evflags = events[i].events;
+        for (int i = 0; i < nev; i++) {
+            int      fd      = events[i].data.fd;
+            uint32_t evmask  = events[i].events;
 
-            if (ptr == TAG_SERVER) {
-                do_accept();
-
-            } else if (ptr == TAG_SIGNAL) {
+            /* ── signal ── */
+            if (fd == sigfd) {
                 struct signalfd_siginfo si;
                 read(sigfd, &si, sizeof si);
-                printf("\ncaught signal %u — shutting down\n", si.ssi_signo);
-                running = false;
+                fprintf(stderr, "signal %u — shutting down\n", si.ssi_signo);
+                running = 0;
                 break;
+            }
 
-            } else if (ptr == TAG_TIMER) {
-                /* Drain the timerfd counter before sweeping */
+            /* ── idle sweep timer ── */
+            if (fd == tfd) {
                 uint64_t expirations;
                 read(tfd, &expirations, sizeof expirations);
-                do_idle_sweep();
+                idle_sweep();
+                continue;
+            }
 
-            } else {
-                conn_t *c      = ptr;
-                int     saved_fd = c->fd;   /* save before any close */
+            /* ── new connection ── */
+            if (fd == listenfd) {
+                drain_accept(listenfd);
+                continue;
+            }
 
-                if (evflags & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    conn_close(c);
+            /* ── existing connection ── */
+            conn_t *c = (fd >= 0 && fd < MAX_CONNS) ? conns[fd] : NULL;
+            if (!c) continue;
+
+            if (evmask & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
+                conn_free(c);
+                continue;
+            }
+
+            /* Flush output queue first so we free buffer space before reading. */
+            if (evmask & EPOLLOUT) {
+                if (conn_flush(c) < 0) {
+                    conn_free(c);
                     continue;
                 }
-                if (evflags & EPOLLIN)
-                    conn_do_read(c);
-                /*
-                 * Re-check the table: conn_do_read may have closed the
-                 * connection (EOF or error), so only call write if the
-                 * conn_t is still live.
-                 */
-                if (fd_table[saved_fd] == c && (evflags & EPOLLOUT))
-                    conn_do_write(c);
+            }
+
+            if (evmask & EPOLLIN) {
+                if (conn_read(c) < 0) {
+                    conn_free(c);
+                    continue;
+                }
             }
         }
     }
 
-    cleanup_all();
-    printf("done.\n");
+    /* ── graceful shutdown ── */
+    fprintf(stderr, "closing %d connection(s)\n",
+            (int)(sizeof conns / sizeof *conns));  /* upper bound message */
+
+    for (int i = 0; i < MAX_CONNS; i++) {
+        if (conns[i]) conn_free(conns[i]);
+    }
+
+    close(listenfd);
+    close(sigfd);
+    close(tfd);
+    close(epfd);
+
+    fprintf(stderr, "shutdown complete\n");
     return 0;
 }

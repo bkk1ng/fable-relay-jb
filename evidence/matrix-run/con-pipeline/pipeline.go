@@ -1,6 +1,5 @@
-// pipeline.go — Go 1.22 channel pipeline demo
-// Stages: generator → fan-out (N transformers) → fan-in
-// Features: context cancellation, bounded buffers, errgroup-free error collection
+// pipeline.go — channel pipeline: generator → fan-out → fan-in
+// Go 1.22 | context cancellation, bounded buffers, errgroup-free error collection
 package main
 
 import (
@@ -12,122 +11,136 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 
-// Result carries a transformed value or an error from a single pipeline item.
-type Result struct {
+// Item is the unit flowing through the pipeline.
+type Item struct {
+	ID    int
 	Value int
-	Err   error
 }
 
-// ---------------------------------------------------------------------------
-// Stage 1 — Generator
-// Emits integers 0..count-1 onto a buffered channel, then closes it.
-// Respects ctx cancellation: stops early and closes the channel cleanly.
-// ---------------------------------------------------------------------------
+// Result carries a transformed item or an error from a worker stage.
+type Result struct {
+	Item Item
+	Err  error
+}
 
-func generator(ctx context.Context, count int, bufSize int) <-chan int {
-	out := make(chan int, bufSize)
+// ----------------------------------------------------------------------------
+// Stage 1 — Generator
+// Emits Items until count is reached or ctx is cancelled.
+// The returned channel is closed when the stage exits.
+// ----------------------------------------------------------------------------
+
+func generate(ctx context.Context, count int) <-chan Item {
+	out := make(chan Item, 16) // bounded buffer
 	go func() {
 		defer close(out)
 		for i := range count {
+			item := Item{ID: i, Value: rand.IntN(100)}
 			select {
 			case <-ctx.Done():
 				return
-			case out <- i:
+			case out <- item:
 			}
 		}
 	}()
 	return out
 }
 
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // Stage 2 — Transformer (single worker)
-// Reads from in, applies work(), writes Result to out.
-// Stopped by ctx or by in being closed.
-// ---------------------------------------------------------------------------
+// Reads from in, applies transform, writes Result to out.
+// Propagates ctx cancellation; a transform error is sent as a Result, not fatal.
+// ----------------------------------------------------------------------------
 
-func transformer(ctx context.Context, id int, in <-chan int, out chan<- Result) {
+func transform(ctx context.Context, id int, in <-chan Item, out chan<- Result) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case v, ok := <-in:
+		case item, ok := <-in:
 			if !ok {
 				return
 			}
-			out <- work(ctx, id, v)
+			r, err := process(id, item)
+			res := Result{Item: r, Err: err}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- res:
+			}
 		}
 	}
 }
 
-// work is the per-item computation. It simulates occasional errors and latency.
-func work(ctx context.Context, workerID int, v int) Result {
-	// Simulate variable processing time (1–5ms).
-	delay := time.Duration(1+rand.IntN(5)) * time.Millisecond
-	select {
-	case <-ctx.Done():
-		return Result{Err: ctx.Err()}
-	case <-time.After(delay):
-	}
+// process is the actual work. Returns an error on bad input to demonstrate
+// per-item error propagation without killing the pipeline.
+func process(workerID int, item Item) (Item, error) {
+	// Simulate work.
+	time.Sleep(time.Duration(rand.IntN(5)) * time.Millisecond)
 
-	// Inject a synthetic error ~10% of the time.
-	if v%10 == 7 {
-		return Result{Err: fmt.Errorf("worker %d: bad value %d", workerID, v)}
+	if item.Value == 42 { // contrived error trigger
+		return Item{}, fmt.Errorf("worker %d: rejected item %d (value=42)", workerID, item.ID)
 	}
-	return Result{Value: v * v}
+	return Item{ID: item.ID, Value: item.Value * 2}, nil
 }
 
-// ---------------------------------------------------------------------------
-// Fan-out + Fan-in
-// fanOut spins up n transformer goroutines, all reading from the same source.
-// fanIn merges n Result channels into one, closing it once every worker exits.
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Fan-out
+// Spins up n transformer goroutines that all read from the same source channel.
+// Returns a slice of per-worker result channels so fan-in can drain them all.
+// ----------------------------------------------------------------------------
 
-func fanOut(ctx context.Context, n int, source <-chan int, bufSize int) []<-chan Result {
-	channels := make([]<-chan Result, n)
+func fanOut(ctx context.Context, n int, src <-chan Item) []<-chan Result {
+	outs := make([]<-chan Result, n)
 	for i := range n {
-		ch := make(chan Result, bufSize)
-		channels[i] = ch
+		ch := make(chan Result, 8) // bounded per-worker buffer
+		outs[i] = ch
 		go func(id int, out chan<- Result) {
 			defer close(out)
-			transformer(ctx, id, source, out)
+			transform(ctx, id, src, out)
 		}(i, ch)
 	}
-	return channels
+	return outs
 }
 
-func fanIn(ctx context.Context, inputs []<-chan Result) <-chan Result {
-	merged := make(chan Result, len(inputs))
+// ----------------------------------------------------------------------------
+// Fan-in (merge)
+// Merges n result channels into one. Uses a WaitGroup to close the merged
+// channel only after every worker has finished.
+// ----------------------------------------------------------------------------
+
+func fanIn(ctx context.Context, ins []<-chan Result) <-chan Result {
+	merged := make(chan Result, 32) // bounded merged buffer
 	var wg sync.WaitGroup
 
-	forward := func(ch <-chan Result) {
+	forward := func(in <-chan Result) {
 		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case r, ok := <-ch:
+			case res, ok := <-in:
 				if !ok {
 					return
 				}
 				select {
 				case <-ctx.Done():
 					return
-				case merged <- r:
+				case merged <- res:
 				}
 			}
 		}
 	}
 
-	wg.Add(len(inputs))
-	for _, ch := range inputs {
-		go forward(ch)
+	wg.Add(len(ins))
+	for _, in := range ins {
+		go forward(in)
 	}
 
-	// Close merged once every forwarder has exited.
+	// Close merged once all forwarders are done.
 	go func() {
 		wg.Wait()
 		close(merged)
@@ -136,74 +149,60 @@ func fanIn(ctx context.Context, inputs []<-chan Result) <-chan Result {
 	return merged
 }
 
-// ---------------------------------------------------------------------------
-// Error collector — errgroup-free
-// Collects every non-nil error from the pipeline into a slice.
-// Call collect() after the results channel is drained to retrieve them.
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Error collector (errgroup-free)
+// Drains the merged channel; accumulates errors, returns processed items and
+// all errors seen. Runs synchronously in the caller's goroutine so the caller
+// can inspect results before the timeout fires.
+// ----------------------------------------------------------------------------
 
-type errorCollector struct {
-	mu   sync.Mutex
-	errs []error
+func collect(merged <-chan Result) ([]Item, []error) {
+	var items []Item
+	var errs []error
+	for res := range merged {
+		if res.Err != nil {
+			errs = append(errs, res.Err)
+		} else {
+			items = append(items, res.Item)
+		}
+	}
+	return items, errs
 }
 
-func (ec *errorCollector) add(err error) {
-	ec.mu.Lock()
-	ec.errs = append(ec.errs, err)
-	ec.mu.Unlock()
-}
-
-func (ec *errorCollector) collect() []error {
-	ec.mu.Lock()
-	defer ec.mu.Unlock()
-	out := make([]error, len(ec.errs))
-	copy(out, ec.errs)
-	return out
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// main
+// ----------------------------------------------------------------------------
 
 func main() {
 	const (
-		itemCount  = 50  // total integers to process
-		workers    = 4   // fan-out width
-		bufSize    = 8   // buffer depth for every channel in the pipeline
-		timeoutSec = 3   // overall deadline
+		itemCount  = 50
+		numWorkers = 4
+		timeout    = 2 * time.Second
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutSec*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Build the pipeline.
-	source := generator(ctx, itemCount, bufSize)
-	workerChans := fanOut(ctx, workers, source, bufSize)
-	results := fanIn(ctx, workerChans)
-
-	// Drain results and collect errors.
-	var ec errorCollector
-	var successes int
-
-	for r := range results {
-		if r.Err != nil {
-			ec.add(r.Err)
-			continue
-		}
-		successes++
-		fmt.Printf("  ok  %d\n", r.Value)
-	}
+	// Wire the pipeline.
+	src := generate(ctx, itemCount)
+	workerChans := fanOut(ctx, numWorkers, src)
+	merged := fanIn(ctx, workerChans)
+	items, errs := collect(merged)
 
 	// Report.
-	errs := ec.collect()
-	fmt.Printf("\n--- pipeline complete ---\n")
-	fmt.Printf("successes : %d\n", successes)
-	fmt.Printf("errors    : %d\n", len(errs))
-	for _, e := range errs {
-		fmt.Printf("  err: %v\n", e)
+	fmt.Printf("processed: %d items\n", len(items))
+	for _, item := range items {
+		fmt.Printf("  id=%-3d value=%d\n", item.ID, item.Value)
+	}
+
+	if len(errs) > 0 {
+		fmt.Printf("\nerrors (%d):\n", len(errs))
+		for _, e := range errs {
+			fmt.Printf("  %v\n", e)
+		}
 	}
 
 	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
-		fmt.Println("note: pipeline was cut short by timeout")
+		fmt.Println("\npipeline cancelled: deadline exceeded")
 	}
 }

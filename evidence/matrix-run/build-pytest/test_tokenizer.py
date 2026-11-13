@@ -1,349 +1,415 @@
 """
-pytest suite for a tokenizer module exposing tokenize(text: str) -> list[str].
+Pytest suite for a tokenizer module.
 
-The module is imported with a fallback stub so this file is import-error-free
-even when the real implementation is not installed.
+Expected public interface:
+    tokenize(text: str) -> list[str]
+
+Standalone guarantee: if the real ``tokenizer`` package is not installed, a
+minimal stub is inserted into ``sys.modules`` before any test runs, so the
+file can be collected and executed with no import errors.
+
+Slow-test marker
+----------------
+Tests decorated with ``@pytest.mark.slow`` are excluded by default.  To run
+them pass ``-m slow`` (or ``-m "slow or not slow"`` for everything).  To
+suppress the "unknown mark" warning without a conftest.py, add this to
+``pytest.ini`` or ``pyproject.toml``::
+
+    [pytest]
+    markers =
+        slow: marks tests that exercise large inputs or timing-sensitive paths
 """
 
 from __future__ import annotations
 
-import importlib
 import os
+import re
 import sys
 import types
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# Fallback stub — keeps the file import-error-free when tokenizer is absent.
-# If the real module is on sys.path it is used instead.
+# Stub — inserted when the real tokenizer is absent
 # ---------------------------------------------------------------------------
 
-def _load_tokenizer() -> types.ModuleType:
-    spec = importlib.util.find_spec("tokenizer")
-    if spec is not None:
-        return importlib.import_module("tokenizer")
+def _build_stub() -> types.ModuleType:
+    """
+    Minimal ``tokenizer`` stub that satisfies the public contract.
 
-    # Build a minimal stub so every test can at least import and run.
-    stub = types.ModuleType("tokenizer")
+    Behaviour used by the test suite:
+    * Returns an empty list for blank / whitespace-only input.
+    * Splits on whitespace and strips punctuation (word characters only).
+    * Raises ``TypeError`` for non-string input.
+    * Respects ``TOKENIZER_LOCALE=lower`` by lowercasing every token.
+    """
+    mod = types.ModuleType("tokenizer")
+    mod.__doc__ = "Stub tokenizer inserted by test_tokenizer.py"
 
-    def _stub_tokenize(text: str) -> list[str]:
-        """Reference implementation used when the real module is absent."""
+    def tokenize(text: str) -> list[str]:  # noqa: D401
         if not isinstance(text, str):
-            raise TypeError(f"tokenize() expects str, got {type(text).__name__}")
-        if not text:
-            return []
-        return text.split()
+            raise TypeError(
+                f"tokenize() expects str, got {type(text).__name__!r}"
+            )
+        tokens: list[str] = re.findall(r"[A-Za-z0-9']+", text)
+        if os.environ.get("TOKENIZER_LOCALE") == "lower":
+            tokens = [t.lower() for t in tokens]
+        return tokens
 
-    stub.tokenize = _stub_tokenize
-    sys.modules["tokenizer"] = stub
-    return stub
+    mod.tokenize = tokenize  # type: ignore[attr-defined]
+    return mod
 
 
-tokenizer = _load_tokenizer()
-tokenize = tokenizer.tokenize
+try:
+    import tokenizer as _tok_module  # noqa: F401
+except ImportError:
+    _tok_module = _build_stub()
+    sys.modules["tokenizer"] = _tok_module
 
-# ---------------------------------------------------------------------------
-# Custom marker registration (also declared in pytest.ini / pyproject.toml)
-# ---------------------------------------------------------------------------
-
-def pytest_configure(config: pytest.Config) -> None:  # noqa: D401
-    config.addinivalue_line(
-        "markers",
-        "slow: mark test as slow-running (deselect with -m 'not slow')",
-    )
+from tokenizer import tokenize  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Shared fixtures
+# Fixtures — shared data and helpers
 # ---------------------------------------------------------------------------
-
-@pytest.fixture()
-def common_sentences() -> list[str]:
-    """A handful of plain sentences shared across multiple tests."""
-    return [
-        "the quick brown fox",
-        "hello world",
-        "one",
-        "   leading and trailing   ",
-    ]
-
-
-@pytest.fixture()
-def punctuation_rich() -> str:
-    """A string that contains punctuation a real tokenizer must handle."""
-    return "Hello, world! This is a test: one, two, three."
-
 
 @pytest.fixture(scope="module")
-def large_corpus() -> str:
-    """A large string used by slow / performance tests (module-scoped)."""
-    words = ["word"] * 10_000
-    return " ".join(words)
+def sample_texts() -> dict[str, str]:
+    """
+    Named text strings reused across test functions.
+
+    Keeping these in one place makes it easy to extend coverage without
+    changing individual tests.
+    """
+    return {
+        "greeting":       "Hello, world!",
+        "pangram":        "The quick brown fox jumps over the lazy dog.",
+        "numbers":        "42 items cost $3.99 each",
+        "mixed_case":     "Python IS awesome",
+        "multiline":      "first line\nsecond line\nthird line",
+        "repeated_word":  "ha ha ha ha ha",
+        "single_word":    "tokenizer",
+        "tabs":           "word1\tword2\tword3",
+        "empty":          "",
+        "whitespace_only": "   \t\n  ",
+    }
+
+
+@pytest.fixture()
+def write_text(tmp_path):
+    """
+    Factory: write *content* to a file inside the test's tmp_path and return
+    the ``pathlib.Path``.  Accepts an optional *filename* keyword argument.
+    """
+    def _write(content: str, filename: str = "input.txt") -> "os.PathLike[str]":
+        path = tmp_path / filename
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    return _write
 
 
 # ---------------------------------------------------------------------------
-# Parametrized basic-correctness tests
+# Return-type contract
 # ---------------------------------------------------------------------------
 
-BASIC_CASES: list[tuple[str, list[str]]] = [
-    ("hello world", ["hello", "world"]),
-    ("one", ["one"]),
-    ("", []),
-    ("  spaces  between  words  ", ["spaces", "between", "words"]),
-    ("a b c d e", ["a", "b", "c", "d", "e"]),
-]
-
-
-@pytest.mark.parametrize("text,expected", BASIC_CASES, ids=[c[0][:20] or "<empty>" for c in BASIC_CASES])
-def test_basic_tokenization(text: str, expected: list[str]) -> None:
-    assert tokenize(text) == expected
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello world",
+        "",
+        "single",
+        "  leading and trailing  ",
+        "line1\nline2",
+        "tab\tseparated",
+    ],
+    ids=["two-words", "empty", "single", "padded", "newline", "tab"],
+)
+def test_tokenize_always_returns_list(text: str) -> None:
+    assert isinstance(tokenize(text), list)
 
 
 @pytest.mark.parametrize(
     "text",
-    ["", "   ", "\t\n\r"],
-    ids=["empty_string", "only_spaces", "only_whitespace_chars"],
-)
-def test_empty_or_whitespace_returns_empty_list(text: str) -> None:
-    result = tokenize(text)
-    assert isinstance(result, list)
-    assert len(result) == 0
-
-
-@pytest.mark.parametrize(
-    "text,min_tokens",
     [
-        ("one two three", 3),
-        ("a b c d e f", 6),
+        "hello world",
+        "one two three four five",
+        "a b c d e f g",
     ],
 )
-def test_token_count(text: str, min_tokens: int) -> None:
-    result = tokenize(text)
-    assert len(result) >= min_tokens
+def test_every_token_is_a_string(text: str) -> None:
+    for token in tokenize(text):
+        assert isinstance(token, str)
 
 
 # ---------------------------------------------------------------------------
-# Return-type invariant
+# Empty / blank input
 # ---------------------------------------------------------------------------
 
-def test_return_type_is_list(common_sentences: list[str]) -> None:
-    for sentence in common_sentences:
-        result = tokenize(sentence.strip())
-        assert isinstance(result, list), f"Expected list, got {type(result)} for {sentence!r}"
-        assert all(isinstance(tok, str) for tok in result), "All tokens must be str"
-
-
-def test_tokens_are_non_empty_strings(common_sentences: list[str]) -> None:
-    for sentence in common_sentences:
-        for token in tokenize(sentence.strip()):
-            assert len(token) > 0, f"Empty token found in result for {sentence!r}"
+@pytest.mark.parametrize(
+    "blank",
+    ["", " ", "  ", "\t", "\n", "\r\n", "   \t   \n   "],
+    ids=["empty", "one-space", "spaces", "tab", "newline", "crlf", "mixed-ws"],
+)
+def test_blank_input_returns_empty_list(blank: str) -> None:
+    assert tokenize(blank) == []
 
 
 # ---------------------------------------------------------------------------
-# File-based tests using tmp_path
+# Token content / structure
 # ---------------------------------------------------------------------------
 
-def test_tokenize_content_from_file(tmp_path: Path) -> None:
-    """tokenize() should produce the same result regardless of the input source."""
-    sample = "the quick brown fox jumps over the lazy dog"
-    input_file = tmp_path / "input.txt"
-    input_file.write_text(sample, encoding="utf-8")
-
-    text = input_file.read_text(encoding="utf-8")
-    result = tokenize(text)
-    assert result == tokenize(sample)
-
-
-def test_multiple_files_in_tmp_path(tmp_path: Path) -> None:
-    sentences = {
-        "a.txt": "hello world",
-        "b.txt": "foo bar baz",
-        "c.txt": "",
-    }
-    for name, content in sentences.items():
-        (tmp_path / name).write_text(content, encoding="utf-8")
-
-    for name, content in sentences.items():
-        text = (tmp_path / name).read_text(encoding="utf-8")
-        result = tokenize(text)
-        assert result == tokenize(content)
-
-
-def test_unicode_file_roundtrip(tmp_path: Path) -> None:
-    sample = "café naïve résumé"
-    path = tmp_path / "unicode.txt"
-    path.write_text(sample, encoding="utf-8")
-    result = tokenize(path.read_text(encoding="utf-8"))
-    assert isinstance(result, list)
-    assert len(result) > 0
-
-
-def test_large_file_produces_tokens(tmp_path: Path) -> None:
-    words = ["token"] * 1_000
-    text = " ".join(words)
-    path = tmp_path / "large.txt"
-    path.write_text(text, encoding="utf-8")
-    result = tokenize(path.read_text(encoding="utf-8"))
-    assert len(result) == 1_000
-
-
-# ---------------------------------------------------------------------------
-# Expected-exception tests
-# ---------------------------------------------------------------------------
-
-def test_raises_on_non_string_input_int() -> None:
-    with pytest.raises(TypeError):
-        tokenize(42)  # type: ignore[arg-type]
-
-
-def test_raises_on_non_string_input_none() -> None:
-    with pytest.raises(TypeError):
-        tokenize(None)  # type: ignore[arg-type]
-
-
-def test_raises_on_non_string_input_list() -> None:
-    with pytest.raises(TypeError):
-        tokenize(["already", "a", "list"])  # type: ignore[arg-type]
-
-
-def test_raises_on_bytes_input() -> None:
-    with pytest.raises(TypeError):
-        tokenize(b"bytes input")  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("hello world",        ["hello", "world"]),
+        ("one two three",      ["one", "two", "three"]),
+        ("Hello World",        ["Hello", "World"]),
+    ],
+)
+def test_basic_word_tokenisation(text: str, expected: list[str]) -> None:
+    assert tokenize(text) == expected
 
 
 @pytest.mark.parametrize(
-    "bad_input",
-    [123, 3.14, {"key": "value"}, object()],
-    ids=["int", "float", "dict", "object"],
+    "text, min_count",
+    [
+        ("a b c",          3),
+        ("one two",        2),
+        ("alpha beta gamma delta epsilon", 5),
+    ],
 )
-def test_raises_type_error_parametrized(bad_input: Any) -> None:
-    with pytest.raises(TypeError):
-        tokenize(bad_input)  # type: ignore[arg-type]
+def test_minimum_token_count(text: str, min_count: int) -> None:
+    assert len(tokenize(text)) >= min_count
+
+
+def test_no_empty_string_tokens(sample_texts: dict[str, str]) -> None:
+    """Every returned token must be non-empty."""
+    for label, text in sample_texts.items():
+        for token in tokenize(text):
+            assert token != "", f"Empty token in output for sample {label!r}"
+
+
+def test_single_word_gives_one_token(sample_texts: dict[str, str]) -> None:
+    result = tokenize(sample_texts["single_word"])
+    assert len(result) == 1
+    assert result[0] == "tokenizer"
+
+
+def test_repeated_word_tokens_all_equal(sample_texts: dict[str, str]) -> None:
+    result = tokenize(sample_texts["repeated_word"])
+    assert len(result) >= 2
+    assert len(set(result)) == 1, "All tokens should be identical for repeated-word input"
 
 
 # ---------------------------------------------------------------------------
-# Monkeypatched-environment tests
+# Fixture-driven smoke tests across the full sample catalogue
 # ---------------------------------------------------------------------------
 
-def test_tokenize_unaffected_by_locale_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """tokenize() must behave consistently regardless of LANG / LC_ALL."""
-    monkeypatch.setenv("LANG", "C")
-    monkeypatch.setenv("LC_ALL", "C")
-    result = tokenize("hello world")
+def test_all_samples_return_lists(sample_texts: dict[str, str]) -> None:
+    for label, text in sample_texts.items():
+        result = tokenize(text)
+        assert isinstance(result, list), f"Expected list for sample {label!r}"
+
+
+# ---------------------------------------------------------------------------
+# File-based tests (tmp_path)
+# ---------------------------------------------------------------------------
+
+def test_tokenise_simple_file_content(write_text) -> None:
+    path = write_text("hello from a file")
+    result = tokenize(path.read_text(encoding="utf-8"))
     assert "hello" in result
-    assert "world" in result
+    assert "file" in result
 
 
-def test_tokenize_with_custom_env_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Simulate an environment that the module might read at import time."""
-    monkeypatch.setenv("TOKENIZER_MODE", "strict")
-    result = tokenize("some text here")
-    # Regardless of mode the result must still be a non-empty list.
-    assert isinstance(result, list)
-    assert len(result) > 0
+def test_tokenise_multiline_file(write_text) -> None:
+    path = write_text("first line\nsecond line\nthird line")
+    result = tokenize(path.read_text(encoding="utf-8"))
+    # Expect at least one token per word
+    assert len(result) >= 6
 
 
-def test_tokenize_with_absent_env_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TOKENIZER_MODE", raising=False)
-    result = tokenize("some text here")
-    assert isinstance(result, list)
-
-
-def test_monkeypatch_tokenize_itself(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace tokenize with a controlled double to verify call-site behaviour."""
-
-    calls: list[str] = []
-
-    def recording_tokenize(text: str) -> list[str]:
-        calls.append(text)
-        return text.split()
-
-    monkeypatch.setattr(tokenizer, "tokenize", recording_tokenize)
-    # Call through the patched module attribute.
-    tokenizer.tokenize("patch test")
-    assert "patch test" in calls
-
-
-def test_path_env_does_not_break_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PATH", "/nonexistent/path")
-    result = tokenize("environment is irrelevant")
-    assert result == ["environment", "is", "irrelevant"]
-
-
-# ---------------------------------------------------------------------------
-# Slow marker — integration / performance tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.slow
-def test_large_corpus_token_count(large_corpus: str) -> None:
-    result = tokenize(large_corpus)
-    assert len(result) == 10_000
-
-
-@pytest.mark.slow
-def test_repeated_calls_are_deterministic(large_corpus: str) -> None:
-    first = tokenize(large_corpus)
-    second = tokenize(large_corpus)
+def test_tokenise_file_round_trip(write_text) -> None:
+    """Re-joining and re-tokenising from a file gives a stable token list."""
+    original = "the quick brown fox"
+    path = write_text(original)
+    first = tokenize(path.read_text(encoding="utf-8"))
+    second = tokenize(" ".join(first))
     assert first == second
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("n", [5_000, 10_000, 50_000])
-def test_scales_linearly_with_input_size(n: int) -> None:
-    text = " ".join(["word"] * n)
-    result = tokenize(text)
-    assert len(result) == n
+@pytest.mark.parametrize(
+    "filename, content, expected_min",
+    [
+        ("poem.txt",   "roses are red\nviolets are blue", 6),
+        ("code.txt",   "def foo bar baz",                 4),
+        ("header.txt", "name age city country",           4),
+    ],
+)
+def test_tokenise_various_file_types(
+    tmp_path,
+    filename: str,
+    content: str,
+    expected_min: int,
+) -> None:
+    path = tmp_path / filename
+    path.write_text(content, encoding="utf-8")
+    result = tokenize(path.read_text(encoding="utf-8"))
+    assert isinstance(result, list)
+    assert len(result) >= expected_min
+
+
+def test_tokenise_large_file(tmp_path) -> None:
+    words = ["alpha", "beta", "gamma", "delta"]
+    lines = [" ".join(words)] * 50          # 50 lines × 4 words = 200 tokens
+    path = tmp_path / "large.txt"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    result = tokenize(path.read_text(encoding="utf-8"))
+    assert len(result) == 200
+
+
+def test_empty_file_returns_empty_list(write_text) -> None:
+    path = write_text("")
+    assert tokenize(path.read_text(encoding="utf-8")) == []
 
 
 # ---------------------------------------------------------------------------
-# Edge-case and idempotency tests
+# Expected exceptions
 # ---------------------------------------------------------------------------
 
-def test_single_character_tokens() -> None:
+@pytest.mark.parametrize(
+    "bad_input",
+    [None, 0, 3.14, [], {}, object()],
+    ids=["none", "int-zero", "float", "list", "dict", "object"],
+)
+def test_non_string_input_raises(bad_input: Any) -> None:
+    with pytest.raises((TypeError, AttributeError)):
+        tokenize(bad_input)  # type: ignore[arg-type]
+
+
+def test_none_raises_type_error() -> None:
+    """Explicit None check — TypeError is the conventional signal."""
+    with pytest.raises((TypeError, AttributeError)):
+        tokenize(None)  # type: ignore[arg-type]
+
+
+def test_integer_raises() -> None:
+    with pytest.raises((TypeError, AttributeError)):
+        tokenize(42)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Monkeypatched environment tests
+# ---------------------------------------------------------------------------
+
+def test_tokenize_with_locale_en(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TOKENIZER_LOCALE", "en")
+    result = tokenize("Hello World")
+    assert isinstance(result, list)
+    assert len(result) >= 1
+
+
+def test_tokenize_without_locale_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TOKENIZER_LOCALE", raising=False)
+    result = tokenize("Hello World")
+    assert isinstance(result, list)
+
+
+def test_locale_lower_produces_lowercase_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TOKENIZER_LOCALE=lower must cause the stub to return lowercase tokens."""
+    monkeypatch.setenv("TOKENIZER_LOCALE", "lower")
+    result = tokenize("Hello WORLD Python")
+    for token in result:
+        assert token == token.lower(), f"Token {token!r} is not lowercase"
+
+
+def test_locale_lower_does_not_affect_empty_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOKENIZER_LOCALE", "lower")
+    assert tokenize("") == []
+
+
+def test_monkeypatch_env_does_not_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Confirm the patched value is visible within the test."""
+    monkeypatch.setenv("TOKENIZER_LOCALE", "lower")
+    assert os.environ.get("TOKENIZER_LOCALE") == "lower"
+    # monkeypatch teardown happens automatically after this test returns.
+
+
+def test_env_restored_after_previous_monkeypatch() -> None:
+    """
+    Runs after test_monkeypatch_env_does_not_leak.
+    The monkeypatch fixture must have restored the environment.
+    """
+    assert os.environ.get("TOKENIZER_LOCALE") != "lower"
+
+
+def test_custom_flag_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TOKENIZER_CUSTOM", "1")
     result = tokenize("a b c")
-    assert result == ["a", "b", "c"]
+    assert isinstance(result, list)
+    assert len(result) == 3
 
 
-def test_newline_separated_words() -> None:
-    result = tokenize("line1\nline2\nline3")
-    # At minimum the words must all appear in the token list.
-    flat = " ".join(result)
-    assert "line1" in flat
-    assert "line2" in flat
-    assert "line3" in flat
+# ---------------------------------------------------------------------------
+# Determinism / idempotency
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "text",
+    ["hello world", "The quick brown fox", "  spaced  out  "],
+)
+def test_tokenize_is_deterministic(text: str) -> None:
+    assert tokenize(text) == tokenize(text)
 
 
-def test_tab_separated_words() -> None:
-    result = tokenize("col1\tcol2\tcol3")
-    flat = " ".join(result)
-    assert "col1" in flat
+def test_idempotent_round_trip() -> None:
+    """Tokenise → join → tokenise should give the same result both times."""
+    text = "the quick brown fox"
+    first = tokenize(text)
+    second = tokenize(" ".join(first))
+    assert first == second
 
 
-def test_idempotency_of_tokens(common_sentences: list[str]) -> None:
-    """tokenize(join(tokenize(text))) must equal tokenize(text)."""
-    for sentence in common_sentences:
-        s = sentence.strip()
-        if not s:
-            continue
-        first_pass = tokenize(s)
-        second_pass = tokenize(" ".join(first_pass))
-        assert first_pass == second_pass, (
-            f"Non-idempotent result for {s!r}: {first_pass!r} vs {second_pass!r}"
-        )
+# ---------------------------------------------------------------------------
+# Slow tests — marked so they can be skipped in fast CI runs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_tokenize_hundred_thousand_words() -> None:
+    text = " ".join(["word"] * 100_000)
+    result = tokenize(text)
+    assert len(result) == 100_000
 
 
-def test_very_long_single_token() -> None:
-    long_word = "a" * 10_000
-    result = tokenize(long_word)
-    assert long_word in result
+@pytest.mark.slow
+def test_tokenize_long_single_line() -> None:
+    text = " ".join(["token"] * 50_000)
+    result = tokenize(text)
+    assert len(result) == 50_000
+    assert all(t == "token" for t in result)
 
 
-def test_mixed_whitespace_normalization() -> None:
-    result = tokenize("a  b\t c\n d")
-    assert "a" in result
-    assert "b" in result
-    assert "c" in result
-    assert "d" in result
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "repeat",
+    [10_000, 50_000, 100_000],
+    ids=["10k", "50k", "100k"],
+)
+def test_tokenize_scales_with_input_size(repeat: int) -> None:
+    text = " ".join(["scale"] * repeat)
+    result = tokenize(text)
+    assert len(result) == repeat
+
+
+@pytest.mark.slow
+def test_tokenize_large_file_via_tmp_path(tmp_path) -> None:
+    path = tmp_path / "huge.txt"
+    path.write_text(" ".join(["chunk"] * 200_000), encoding="utf-8")
+    result = tokenize(path.read_text(encoding="utf-8"))
+    assert len(result) == 200_000

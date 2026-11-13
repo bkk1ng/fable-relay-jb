@@ -2,19 +2,19 @@
  "model": "claude-opus-5-5-max",
  "asks": 61,
  "by_cause": {
-  "ok": 57,
-  "incomplete": 3,
+  "ok": 56,
+  "incomplete": 4,
   "refusal": 1
  },
  "by_class": {
   "code": {
    "n": 56,
-   "PASS": 53
+   "PASS": 54
   },
   "security": {
    "n": 5,
-   "PASS": 4
+   "PASS": 2
   }
  },
- "pass_rate_code": 0.946
+ "pass_rate_code": 0.964
 }

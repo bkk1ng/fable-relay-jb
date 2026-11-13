@@ -1,0 +1,21 @@
+{
+ "id": "parse-ini",
+ "lang": "c",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. ini.h and ini.c: INI parser with sections, key=value pairs, ; and # comments, quoted values with escapes, duplicate key detection, and precise error messages with line numbers. ini_parse_file into a caller-provided callback, no allocation beyond a line buffer. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: ini.c",
+ "stop": "tool_use",
+ "out_tokens": 12873,
+ "files": {
+  "ini.h": "/*\n * ini.h \u2014 C11 INI parser\n *\n * Features\n *   - [section] headers\n *   - key = value pairs (whitespace around '=' ignored)\n *   - ; and # full-line comments; inline comments stripped from unquoted values\n *   - \"quoted values\" with \\\\ \\\" \\n \\t \\r \\0 escapes\n *   - duplicate key detection (per section)\n *   - precise error messages with 1-based line numbers\n *   - ini_parse_file \u2192 caller-supplied callback, no heap allocation\n */\n\n#ifndef INI_H\n#define INI_H\n\n#include <stdio.h>\n#include <stddef.h>\n\n/* Tune these if your files are wider or names are longer. */\n#define INI_LINE_MAX    1024   /* maximum raw line length including NUL       */\n#define INI_SECTION_MAX  256   /* maximum section name length including NUL   */\n#define INI_KEY_MAX      256   /* maximum key length including NUL            */\n#define INI_ERRBUF_MIN   256   /* recommended minimum size for errbuf         */\n\n/*\n * Duplicate-detection hash table capacity (must be a power of two).\n * Covers up to ~HSET_CAP * 0.75 unique section+key pairs before the\n * check is silently skipped for further entries.\n */\n#define INI_HSET_CAP    1024u\n\ntypedef enum {\n    INI_OK            = 0,  /* success, or handler requested early stop      */\n    INI_ERR_IO        = 1,  /* fgets / stream error                          */\n    INI_ERR_SYNTAX    = 2,  /* malformed line                                */\n    INI_ERR_DUPLICATE = 3,  /* duplicate key within a section                */\n    INI_ERR_OVERFLOW  = 4,  /* line or name exceeds the configured limit     */\n} ini_err_t;\n\n/*\n * ini_handler_t \u2014 callback invoked for every key=value pair.\n *\n *   userdata  caller context, passed through unchanged\n *   section   current section name; empty string before the first header\n *   key       key string, trimmed\n *   value     value string, trimmed; quotes and escapes already resolved\n *   lineno    1-based source line number\n *\n * Return 0 to continue parsing, any non-zero value to stop early.\n * An early stop is reported as INI_OK (not an error).\n */\ntypedef int (*ini_handler_t)(\n    void       *userdata,\n    const char *section,\n    const char *key,\n    const char *value,\n    int         lineno\n);\n\n/*\n * ini_parse_file \u2014 parse an INI stream.\n *\n *   f         open FILE* positioned at the start of INI content\n *   handler   callback invoked per key=value pair\n *   userdata  passed through to handler unchanged\n *   errbuf    if non-NULL, receives a NUL-terminated error message on failure\n *   errbufsz  byte capacity of errbuf (INI_ERRBUF_MIN recommended)\n *\n * Returns INI_OK on success or early handler stop.\n * On any INI_ERR_* code, errbuf (if provided) contains the reason.\n */\nini_err_t ini_parse_file(\n    FILE          *f,\n    ini_handler_t  handler,\n    void          *userdata,\n    char          *errbuf,\n    size_t         errbufsz\n);\n\n#endif /* INI_H */\n"
+ },
+ "prose": "",
+ "secs": 269.2
+}

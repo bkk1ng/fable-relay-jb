@@ -1,0 +1,21 @@
+{
+ "id": "emb-sched",
+ "lang": "c",
+ "domain": "embedded",
+ "cls": "code",
+ "v": "arm",
+ "ask": "Bare-metal C for ARM Cortex-M4, no HAL. sched.h and sched.c: cooperative scheduler with fixed task slots (function pointer, period in ticks, last run, enabled flag), sched_add/sched_remove/sched_tick called from SysTick, longest-wait-first selection, and overflow-safe tick maths. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: sched.c",
+ "stop": "tool_use",
+ "out_tokens": 11944,
+ "files": {
+  "sched.h": "/**\n * sched.h \u2014 cooperative tick scheduler for ARM Cortex-M4, no HAL.\n *\n * Usage\n * -----\n *   1. Call sched_init() before enabling SysTick.\n *   2. Configure SysTick to call sched_tick() from SysTick_Handler.\n *   3. Register tasks with sched_add(); hold the returned slot index to\n *      remove or suspend later.\n *\n * Dispatch model\n * --------------\n *   sched_tick() runs the single most-overdue enabled task per tick.\n *   \"Most overdue\" means the largest (now - last_run) among all tasks\n *   where that value >= period (overflow-safe unsigned subtraction).\n *   Tasks execute in ISR context (Handler mode, MSP); keep them short.\n *\n * Overflow safety\n * ---------------\n *   The tick counter and all deadline comparisons use uint32_t unsigned\n *   subtraction.  (uint32_t)(now - last_run) wraps correctly through the\n *   full 32-bit rollover provided no task misses more than 2^32 \u2212 1 ticks\n *   (~49 days at 1 kHz).\n */\n\n#ifndef SCHED_H\n#define SCHED_H\n\n#include <stdint.h>\n#include <stdbool.h>\n\n#ifndef SCHED_MAX_TASKS\n/** Maximum number of simultaneous task slots.  Override via -DSCHED_MAX_TASKS=N. */\n#define SCHED_MAX_TASKS  8\n#endif\n\n/** Single task descriptor stored in the scheduler table. */\ntypedef struct {\n    void     (*fn)(void);  /**< Entry point; NULL marks the slot as free.          */\n    uint32_t  period;      /**< Repeat interval in SysTick ticks.                  */\n    uint32_t  last_run;    /**< Tick value recorded at the most recent execution.   */\n    bool      enabled;     /**< false suspends dispatch without freeing the slot.   */\n} sched_task_t;\n\n/**\n * @brief  Zero the task table and tick counter.\n *         Call once before any other sched_* function and before SysTick\n *         is enabled.\n */\nvoid sched_init(void);\n\n/**\n * @brief  Register a periodic task.\n *\n * @param  fn            Callback to invoke; must not be NULL.\n * @param  period_ticks  Ticks between successive executions.  0 fires every tick.\n *\n * @return Non-negative slot index on success, -1 when the table is full.\n */\nint sched_add(void (*fn)(void), uint32_t period_ticks);\n\n/**\n * @brief  Remove a task and free its slot for reuse.\n *         Safe to call from thread context while SysTick is active.\n *\n * @param  slot  Value returned by a prior sched_add() call.\n */\nvoid sched_remove(int slot);\n\n/**\n * @brief  Suspend or resume a task without releasing its slot.\n *         Re-enabling resets last_run to now so the task fires one full\n *         period later rather than immediately.\n *\n * @param  slot     Value returned by a prior sched_add() call.\n * @param  enabled  true to resume, false to suspend.\n */\nvoid sched_enable(int slot, bool enabled);\n\n/**\n * @brief  Advance the tick counter and dispatch the longest-waiting ready task.\n *\n *         Wire this directly to SysTick_Handler:\n *\n *             void SysTick_Handler(void) { sched_tick(); }\n *\n * @note   Task callbacks run in Handler mode on the MSP.  Do not block,\n *         do not call functions that re-enable interrupts, and keep stack\n *         depth predictable.\n */\nvoid sched_tick(void);\n\n#endif /* SCHED_H */\n"
+ },
+ "prose": "",
+ "secs": 52.9
+}

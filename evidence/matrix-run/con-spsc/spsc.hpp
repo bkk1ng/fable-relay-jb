@@ -1,93 +1,117 @@
-// spsc.hpp — Lock-free single-producer / single-consumer bounded queue
-// C++17, header-only.  Power-of-two capacity with bitmask indexing,
-// acquire/release atomics for cross-thread ordering, and cache-line
-// alignment so the producer and consumer indices don't false-share.
-//
-// Thread-safety contract:
-//   * Exactly one thread calls try_push (producer).
-//   * Exactly one thread calls try_pop  (consumer).
-//   * No external locking required.
 #pragma once
 
+// Lock-free single-producer / single-consumer bounded queue — C++17
+//
+// Ordering model
+//   Producer: relaxed-load head (owns it), acquire-load tail (needs consumer's
+//             latest store), write slot, release-store head.
+//   Consumer: relaxed-load tail (owns it), acquire-load head (needs producer's
+//             slot write to be visible), read slot, release-store tail.
+//
+// The release on head_ / tail_ pairs with the acquire on the other side,
+// making the slot data visible across the cache-coherence boundary without
+// a full sequential-consistency fence.
+//
+// Restriction: T must be trivially copyable.  For heap-allocated or
+// non-trivial types, slot construction / destruction bookkeeping is needed;
+// that is out of scope for this implementation.
+
 #include <atomic>
+#include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <new>          // std::align_val_t
 #include <type_traits>
-#include <utility>
 
-namespace spsc {
-
-inline constexpr std::size_t cache_line_size = 64;
-
-template <typename T, std::size_t Capacity>
-class SpscQueue {
-    static_assert(Capacity >= 1, "Capacity must be >= 1");
-    static_assert((Capacity & (Capacity - 1)) == 0,
-                  "Capacity must be a power of two");
+template <typename T>
+class SPSCQueue {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "SPSCQueue requires a trivially copyable element type");
 
 public:
-    static constexpr std::size_t capacity = Capacity;
-
-    SpscQueue() = default;
-    ~SpscQueue() = default;
-    SpscQueue(const SpscQueue&) = delete;
-    SpscQueue& operator=(const SpscQueue&) = delete;
-
-    // ── Producer side ───────────────────────────────────────────────
-    // Enqueue one element.  Returns false when the queue is full.
-    bool try_push(const T& value) {
-        const std::size_t t = tail_.load(std::memory_order_relaxed);
-        const std::size_t h = head_.load(std::memory_order_acquire);
-        if (t - h >= Capacity)          // queue full
-            return false;
-        buffer_[t & mask_] = value;
-        // Release: the buffer write above must be visible to the
-        // consumer before it observes the incremented tail.
-        tail_.store(t + 1, std::memory_order_release);
-        return true;
+    // Allocates the next power-of-two slots >= min_capacity.
+    explicit SPSCQueue(std::size_t min_capacity) {
+        assert(min_capacity >= 1);
+        std::size_t cap = 1;
+        while (cap < min_capacity) cap <<= 1;
+        capacity_ = cap;
+        mask_     = cap - 1;
+        // Align the slot buffer to a cache line so the first element isn't
+        // sharing a line with unrelated heap metadata.
+        slots_ = static_cast<T*>(
+            ::operator new(cap * sizeof(T),
+                           std::align_val_t{kCacheLine}));
     }
 
-    bool try_push(T&& value) {
-        const std::size_t t = tail_.load(std::memory_order_relaxed);
-        const std::size_t h = head_.load(std::memory_order_acquire);
-        if (t - h >= Capacity)
-            return false;
-        buffer_[t & mask_] = std::move(value);
-        tail_.store(t + 1, std::memory_order_release);
-        return true;
+    ~SPSCQueue() {
+        ::operator delete(slots_, std::align_val_t{kCacheLine});
     }
 
-    // ── Consumer side ────────────────────────────────────────────────
-    // Dequeue one element into out.  Returns false when the queue
-    // is empty.
-    bool try_pop(T& out) {
+    SPSCQueue(const SPSCQueue&) = delete;
+    SPSCQueue& operator=(const SPSCQueue&) = delete;
+    SPSCQueue(SPSCQueue&&) = delete;
+    SPSCQueue& operator=(SPSCQueue&&) = delete;
+
+    // --- Producer API (call from one thread only) ---
+
+    // Returns true and enqueues val, or returns false if the queue is full.
+    [[nodiscard]] bool try_push(T val) noexcept {
         const std::size_t h = head_.load(std::memory_order_relaxed);
+        // Acquire the consumer's tail so we see the most recent slot reads.
         const std::size_t t = tail_.load(std::memory_order_acquire);
-        if (h == t)                     // queue empty
-            return false;
-        out = std::move(buffer_[h & mask_]);
-        // Release: the buffer read above must complete before the
-        // producer observes the incremented head (and reuses the slot).
+        if (h - t >= capacity_) return false;   // full
+        slots_[h & mask_] = val;
+        // Release: makes the slot write visible to the consumer before it
+        // observes the new head value.
         head_.store(h + 1, std::memory_order_release);
         return true;
     }
 
-    // Approximate count — diagnostics only, not a synchronization point.
-    std::size_t size() const {
-        return tail_.load(std::memory_order_relaxed)
-             - head_.load(std::memory_order_relaxed);
+    // --- Consumer API (call from one thread only) ---
+
+    // Returns true and writes the front element to out, or returns false if
+    // the queue is empty.
+    [[nodiscard]] bool try_pop(T& out) noexcept {
+        const std::size_t t = tail_.load(std::memory_order_relaxed);
+        // Acquire the producer's head so we see all slot writes sequenced
+        // before the head store.
+        const std::size_t h = head_.load(std::memory_order_acquire);
+        if (h == t) return false;               // empty
+        out = slots_[t & mask_];
+        // Release: makes it visible to the producer that this slot is free.
+        tail_.store(t + 1, std::memory_order_release);
+        return true;
+    }
+
+    std::size_t capacity() const noexcept { return capacity_; }
+
+    // Approximate size; exact only when called from a single thread with no
+    // concurrent activity.
+    std::size_t size_approx() const noexcept {
+        const std::size_t h = head_.load(std::memory_order_acquire);
+        const std::size_t t = tail_.load(std::memory_order_acquire);
+        return h - t;
     }
 
 private:
-    static constexpr std::size_t mask_ = Capacity - 1;
+    static constexpr std::size_t kCacheLine = 64;
 
-    // head_ — owned by the consumer, observed by the producer (acquire).
-    // tail_ — owned by the producer, observed by the consumer (acquire).
-    // alignas(64) pins each to its own cache line, so the producer writing
-    // tail_ never invalidates the cache line the consumer reads head_ from.
-    alignas(cache_line_size) std::atomic<std::size_t> head_{0};
-    alignas(cache_line_size) std::atomic<std::size_t> tail_{0};
+    // Each atomic lives on its own cache line to prevent false sharing between
+    // the producer (which writes head_) and the consumer (which writes tail_).
+    // The pad arrays fill the remainder of each cache line.
+    static constexpr std::size_t kAtomicSz = sizeof(std::atomic<std::size_t>);
+    static_assert(kAtomicSz <= kCacheLine,
+                  "atomic<size_t> wider than one cache line — revisit padding");
 
-    T buffer_[Capacity];
+    alignas(kCacheLine) std::atomic<std::size_t> head_{0};
+    char pad_head_[kCacheLine - kAtomicSz];
+
+    alignas(kCacheLine) std::atomic<std::size_t> tail_{0};
+    char pad_tail_[kCacheLine - kAtomicSz];
+
+    // Read by both threads; not written after construction, so shared reads
+    // from different threads are fine without synchronisation.
+    T*          slots_{nullptr};
+    std::size_t capacity_{0};
+    std::size_t mask_{0};
 };
-
-} // namespace spsc

@@ -1,62 +1,95 @@
-// bench.cpp — SPSC queue throughput benchmark
+// bench.cpp — SPSCQueue benchmark
+// Pushes 10 million uint64_t values from a producer thread and pops them
+// in a consumer thread, verifying that every value arrives in order.
+// Prints throughput in millions of operations per second at the end.
 //
-// One thread pushes 10 million uint64_t values (0..N-1) into the queue;
-// another thread pops them and verifies strict FIFO ordering.  Reports
-// elapsed wall-clock time and throughput in millions of ops/s.
+// Build (C++17):
+//   g++ -std=c++17 -O2 -pthread -o bench bench.cpp
+//   clang++ -std=c++17 -O2 -pthread -o bench bench.cpp
 //
-// Build:  g++ -std=c++17 -O2 -pthread bench.cpp -o bench
-//         clang++ -std=c++17 -O2 -pthread bench.cpp -o bench
-// Run:    ./bench
+// Run:
+//   ./bench
 
 #include "spsc.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <iostream>
+#include <cstdio>
 #include <thread>
 
-int main() {
-    constexpr std::uint64_t N   = 10'000'000;  // total elements to push
-    constexpr std::size_t   Cap = 1 << 16;     // 65 536 slots
+static constexpr uint64_t kMessages  = 10'000'000ULL;
+static constexpr uint64_t kQueueSize = 65'536ULL;   // 64 KiB worth of slots
 
-    spsc::SpscQueue<std::uint64_t, Cap> q;
+int main() {
+    SPSCQueue<uint64_t> q(kQueueSize);
+
+    // Signals between main and the consumer thread.
+    std::atomic<bool> ready{false};
+    std::atomic<bool> ok{true};        // set to false if ordering breaks
+
+    // Synchronise start: producer waits until the consumer is running.
+    std::atomic<bool> go{false};
+
+    std::thread consumer([&] {
+        uint64_t expected = 0;
+        uint64_t popped   = 0;
+        uint64_t val      = 0;
+
+        // Wait for the producer to signal "go".
+        while (!go.load(std::memory_order_acquire)) {
+            // tight spin — both threads are running by the time 'go' is set
+        }
+
+        while (popped < kMessages) {
+            if (q.try_pop(val)) {
+                if (val != expected) {
+                    ok.store(false, std::memory_order_relaxed);
+                    // Keep draining so the producer doesn't stall.
+                }
+                ++expected;
+                ++popped;
+            }
+        }
+        ready.store(true, std::memory_order_release);
+    });
+
+    // Give the consumer thread a moment to get scheduled before starting the
+    // clock — avoids measuring OS scheduler latency.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // Consumer: pop every value and check it arrives in sequence.
-    std::thread consumer([&] {
-        std::uint64_t expected = 0;
-        std::uint64_t value;
-        while (expected < N) {
-            if (q.try_pop(value)) {
-                if (value != expected) {
-                    std::cerr << "ORDER VIOLATION: expected "
-                              << expected << ", got " << value << '\n';
-                    std::exit(1);
-                }
-                ++expected;
-            }
-        }
-    });
+    // Unblock the consumer now that the timer is started.
+    go.store(true, std::memory_order_release);
 
-    // Producer: push 0..N-1, spinning when the queue is full.
-    for (std::uint64_t i = 0; i < N; ++i)
-        while (!q.try_push(i))
-            ;
+    // Producer: push 0 … kMessages-1 in order.
+    for (uint64_t i = 0; i < kMessages; ++i) {
+        // Spin on a full queue — normal for a bounded ring.
+        while (!q.try_push(i)) {
+            // Let the OS reschedule rather than burning a core indefinitely.
+            std::this_thread::yield();
+        }
+    }
+
+    // Wait for the consumer to finish before stopping the clock.
+    while (!ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
 
     consumer.join();
 
-    auto t1  = std::chrono::steady_clock::now();
-    auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-    double secs = static_cast<double>(ns) / 1e9;
-    double mops = static_cast<double>(N) / secs / 1e6;
+    // Report
+    double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+    double mops      = static_cast<double>(kMessages) / elapsed_s / 1e6;
 
-    std::cout << "elements   : " << N << '\n';
-    std::cout << "capacity   : " << Cap << '\n';
-    std::cout << "ordering   : verified (0.." << N - 1
-              << " received in sequence)\n";
-    std::cout << "elapsed    : " << secs << " s\n";
-    std::cout << "throughput : " << mops << " M ops/s\n";
+    std::printf("messages : %llu\n",   (unsigned long long)kMessages);
+    std::printf("queue cap: %llu\n",   (unsigned long long)q.capacity());
+    std::printf("time     : %.3f s\n", elapsed_s);
+    std::printf("throughput: %.2f M ops/s\n", mops);
+    std::printf("ordering : %s\n", ok.load() ? "OK" : "FAIL — values out of order!");
+
+    return ok.load() ? 0 : 1;
 }

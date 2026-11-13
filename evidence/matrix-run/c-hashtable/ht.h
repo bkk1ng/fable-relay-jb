@@ -1,92 +1,90 @@
-/*
- * ht.h — open-addressing string hash table
- *
- * Hash:    FNV-1a 64-bit
- * Probing: linear
- * Delete:  tombstone markers
- * Resize:  double capacity when live load > 0.7;
- *          rehash in-place (clears tombstones) when total load > 0.7
- *          but live entries alone would fit at current capacity.
- *
- * Keys are copied on insert; values are unmanaged void pointers.
- */
-
 #ifndef HT_H
 #define HT_H
 
-#include <stdbool.h>
 #include <stddef.h>
 
-/* Opaque table handle. */
-typedef struct ht ht;
-
 /*
- * Iterator — stack-allocated, valid until the next ht_set / ht_del / ht_free.
+ * ht.h - open-addressing string hash table
  *
- * Usage:
- *     ht_iter it = ht_iter_new(t);
- *     const char *k;
- *     void       *v;
- *     while (ht_iter_next(&it, &k, &v)) { ... }
+ * Hashing:      FNV-1a (64-bit)
+ * Collision:     linear probing
+ * Deletion:      tombstones (reused on insert, cleared on resize)
+ * Load factor:   0.7  (resize triggers before an insert would exceed it)
+ * Growth:        capacity doubles when threshold is reached
+ *
+ * Keys and values are C strings (NUL-terminated).  The table owns
+ * malloc'd copies of both; they are freed on ht_del and ht_free.
+ *
+ * The fields capacity, count and tombstones are readable for size
+ * queries but must not be modified directly.
+ */
+
+/* Sentinel value that marks a deleted slot. */
+#define HT_TOMBSTONE ((char *)1)
+
+/* One slot in the table.
+ *   key == NULL           -> empty
+ *   key == HT_TOMBSTONE    -> deleted (tombstone)
+ *   otherwise              -> occupied
  */
 typedef struct {
-    ht    *table;
-    size_t index;
-} ht_iter;
+    char *key;
+    char *val;
+} ht_entry;
+
+typedef struct {
+    ht_entry *entries;
+    size_t capacity;    /* total slots, always a power of two */
+    size_t count;       /* live entries */
+    size_t tombstones;  /* deleted slots awaiting reuse or rehash */
+} ht_table;
+
+/* Key-value pair yielded by the iterator. */
+typedef struct {
+    const char *key;
+    const char *val;
+} ht_kv;
 
 /*
- * ht_new — allocate and return a new, empty table.
+ * Create a new hash table.
  * Returns NULL on allocation failure.
  */
-ht    *ht_new(void);
+ht_table *ht_new(void);
 
 /*
- * ht_set — insert or update key with value.
- * The key string is copied internally.
- * Returns true on success, false on allocation failure.
+ * Insert or update a key-value pair.
+ * key and val must be non-NULL.
+ * Returns 1 on success, 0 on allocation failure.
  */
-bool   ht_set(ht *t, const char *key, void *value);
+int ht_set(ht_table *ht, const char *key, const char *val);
 
 /*
- * ht_get — look up key.
- * Returns the stored value pointer, or NULL if not found.
- * Note: NULL is also a valid stored value; use ht_has() if disambiguation
- * matters, or simply avoid storing NULL values.
+ * Look up a key.
+ * Returns the associated value, or NULL if the key is not present.
  */
-void  *ht_get(ht *t, const char *key);
+const char *ht_get(const ht_table *ht, const char *key);
 
 /*
- * ht_del — remove key from the table.
- * Returns true if the key was present and removed, false if not found.
+ * Delete a key, freeing the stored copies.
+ * Returns 1 if the key was found and removed, 0 if the key was absent.
  */
-bool   ht_del(ht *t, const char *key);
+int ht_del(ht_table *ht, const char *key);
 
 /*
- * ht_free — release all memory owned by the table (including copied keys).
+ * Iterate over live entries.
+ *
+ * Initialise *cursor to 0 before the first call.  Each successful call
+ * advances *cursor and fills *out with the next live key-value pair.
+ * Returns 1 while an entry was produced, 0 when iteration is done.
+ *
+ * Do not modify the table (set/del) during iteration.
+ */
+int ht_iter(const ht_table *ht, size_t *cursor, ht_kv *out);
+
+/*
+ * Destroy the table and free every stored string.
  * Safe to call with NULL.
  */
-void   ht_free(ht *t);
-
-/* Number of live (non-deleted) entries. */
-size_t ht_count(const ht *t);
-
-/* Total allocated slot capacity. */
-size_t ht_capacity(const ht *t);
-
-/* Number of tombstone (deleted but not yet reclaimed) slots. */
-size_t ht_tombstones(const ht *t);
-
-/*
- * ht_iter_new — initialise an iterator over t.
- * Returns the iterator by value; no allocation.
- */
-ht_iter ht_iter_new(ht *t);
-
-/*
- * ht_iter_next — advance to the next live entry.
- * Writes the key and value through the out-pointers and returns true.
- * Returns false when the table is exhausted.
- */
-bool ht_iter_next(ht_iter *it, const char **key, void **value);
+void ht_free(ht_table *ht);
 
 #endif /* HT_H */

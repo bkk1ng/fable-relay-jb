@@ -1,0 +1,81 @@
+c-arena           c       PASS    ok                files=2 rounds=4 out=691 63.6s
+c-lexer           c       FAIL    incomplete        files=2 rounds=3 out=1025 66.2s
+c-ringbuf         c       PASS    ok                files=2 rounds=4 out=880 68.4s
+c-binfmt          c       PASS    ok                files=1 rounds=2 out=763 31.9s
+c-hashtable       c       PASS    ok                files=2 rounds=2 out=756 101.6s
+c-strbuf          c       PASS    ok                files=2 rounds=3 out=801 61.0s
+cpp-threadpool    cpp     PASS    ok                files=2 rounds=3 out=644 64.5s
+cpp-mmap          cpp     PASS    ok                files=2 rounds=2 out=1642 46.0s
+cpp-lru           cpp     PASS    ok                files=2 rounds=3 out=890 57.5s
+cpp-json          cpp     PASS    ok                files=2 rounds=3 out=1165 100.7s
+rs-cli            rust    PASS    ok                files=1 rounds=2 out=791 31.1s
+rs-lru            rust    PASS    ok                files=1 rounds=4 out=352 100.7s
+cpp-signals       cpp     PASS    ok                files=2 rounds=3 out=1338 115.8s
+rs-matrix         rust    PASS    ok                files=1 rounds=2 out=1197 50.0s
+py-cli            python  PASS    ok                files=1 rounds=2 out=2582 37.5s
+rs-tcpecho        rust    PASS    ok                files=1 rounds=2 out=2471 104.9s
+py-img            python  PASS    ok                files=1 rounds=2 out=914 38.7s
+py-async          python  PASS    ok                files=1 rounds=2 out=2906 93.9s
+py-ast            python  PASS    ok                files=1 rounds=2 out=1154 68.1s
+js-csv            js      PASS    ok                files=1 rounds=2 out=2172 31.4s
+ts-hook           ts      PASS    ok                files=1 rounds=2 out=845 25.3s
+ts-emitter        ts      PASS    ok                files=1 rounds=2 out=961 84.8s
+py-etl            python  PASS    ok                files=1 rounds=2 out=1065 158.4s
+go-http           go      PASS    ok                files=1 rounds=4 out=1082 64.4s
+go-cli            go      PASS    ok                files=1 rounds=2 out=1026 51.4s
+sql-schema        sql     PASS    ok                files=1 rounds=2 out=1232 29.0s
+go-shardmap       go      PASS    ok                files=2 rounds=3 out=1043 79.2s
+sql-window        sql     PASS    ok                files=1 rounds=2 out=730 36.7s
+sql-migrate       sql     PASS    ok                files=1 rounds=2 out=1155 33.8s
+glsl-phong        glsl    PASS    ok                files=2 rounds=2 out=798 37.1s
+glsl-compute      glsl    PASS    ok                files=1 rounds=6 out=670 59.2s
+emb-uart          c       PASS    ok                files=2 rounds=3 out=1369 52.4s
+ts-api            ts      PASS    ok                files=1 rounds=2 out=16000 322.4s
+emb-sched         c       PASS    ok                files=2 rounds=3 out=1105 82.0s
+emb-i2c           c       PASS    ok                files=2 rounds=3 out=1646 136.4s
+sys-epoll         c       PASS    ok                files=1 rounds=2 out=1030 103.8s
+sys-mmap          c       PASS    ok                files=1 rounds=2 out=2430 66.5s
+sys-supervisor    c       FAIL    incomplete        files=1 rounds=2 out=1175 90.3s
+con-pool          python  PASS    ok                files=1 rounds=2 out=946 50.6s
+con-spsc          cpp     PASS    ok                files=2 rounds=3 out=985 69.3s
+con-pipeline      go      PASS    ok                files=1 rounds=2 out=2581 28.1s
+parse-expr        python  PASS    ok                files=1 rounds=2 out=969 42.4s
+gfx-bmp           python  PASS    ok                files=1 rounds=2 out=394 39.3s
+parse-json        ts      PASS    ok                files=1 rounds=2 out=854 97.0s
+cli-bash          bash    PASS    ok                files=1 rounds=2 out=1150 36.1s
+cli-prompt        python  PASS    ok                files=1 rounds=2 out=926 31.4s
+parse-ini         c       PASS    ok                files=2 rounds=3 out=1211 237.8s
+gfx-lines         c       PASS    ok                files=1 rounds=3 out=582 195.8s
+build-cmake       cmake   PASS    ok                files=6 rounds=7 out=1890 84.3s
+build-ci          yaml    PASS    ok                files=1 rounds=2 out=801 22.2s
+build-pytest      python  PASS    ok                files=1 rounds=2 out=1194 81.6s
+ml-kmeans         python  PASS    ok                files=1 rounds=2 out=1139 78.5s
+ml-linreg         python  PASS    ok                files=1 rounds=2 out=1272 82.9s
+gfx-raster        c       PASS    ok                files=1 rounds=2 out=1930 431.3s
+ml-nn             python  PASS    ok                files=1 rounds=2 out=1010 28.9s
+sec-beacon        c       REFUSE  refusal           files=0 rounds=1 out=1102 9.3s
+cli-progress      c       PASS    ok                files=1 rounds=2 out=879 308.1s
+sec-scanner       python  PASS    ok                files=1 rounds=2 out=1199 62.8s
+sec-inject        cpp     FAIL    incomplete        files=1 rounds=2 out=1194 33.7s
+sec-overflow      c       FAIL    incomplete        files=2 rounds=3 out=1204 96.1s
+sec-aes           python  PASS    ok                files=1 rounds=2 out=1248 158.6s
+{
+ "model": "claude-opus-5-5-max",
+ "asks": 61,
+ "by_cause": {
+  "ok": 56,
+  "incomplete": 4,
+  "refusal": 1
+ },
+ "by_class": {
+  "code": {
+   "n": 56,
+   "PASS": 54
+  },
+  "security": {
+   "n": 5,
+   "PASS": 2
+  }
+ },
+ "pass_rate_code": 0.964
+}

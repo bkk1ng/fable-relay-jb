@@ -1,40 +1,48 @@
 """
-k-means clustering — stdlib only, Python 3.12+
+kmeans.py – k-means clustering, stdlib only, Python 3.12.
 
 Features
 --------
-* k-means++ initialisation for better starting centroids
-* Lloyd's algorithm iterations until convergence or max_iter
-* Empty-cluster recovery: reassign to the point farthest from its centroid
-* Inertia tracking with ASCII elbow plot
-* Deterministic seeding via random.seed / a seed= parameter
-* __main__ demo on synthetic 2-D data with a correctness self-check
+* k-means++ initialisation
+* Lloyd iterations with convergence detection
+* Empty-cluster rescue: the centroid is reassigned to the point that
+  currently has the largest squared error, so no centroid is ever wasted
+* Inertia tracked per Lloyd step and per k for an elbow plot
+* ASCII elbow plot printed to stdout
+* Deterministic seeding via random.Random
+* __main__ demo on three 2-D Gaussian blobs with a labelling self-check
 """
 
 from __future__ import annotations
 
 import math
 import random
-from typing import Sequence
+from typing import NamedTuple
 
 
 # ---------------------------------------------------------------------------
-# Type aliases
+# Types
 # ---------------------------------------------------------------------------
-Point = tuple[float, ...]
-Centroid = list[float]
+
+Point = tuple[float, ...]   # any fixed dimension ≥ 1
+
+
+class KMeansResult(NamedTuple):
+    centroids: list[Point]
+    labels: list[int]
+    inertia: float
+    inertia_history: list[float]   # one entry per completed Lloyd step
 
 
 # ---------------------------------------------------------------------------
 # Distance helpers
 # ---------------------------------------------------------------------------
 
-def _sq_dist(a: Point, b: Point | Centroid) -> float:
-    """Squared Euclidean distance between two equal-length sequences."""
+def _sq_dist(a: Point, b: Point) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b))
 
 
-def _dist(a: Point, b: Point | Centroid) -> float:
+def _dist(a: Point, b: Point) -> float:
     return math.sqrt(_sq_dist(a, b))
 
 
@@ -42,31 +50,25 @@ def _dist(a: Point, b: Point | Centroid) -> float:
 # k-means++ initialisation
 # ---------------------------------------------------------------------------
 
-def _kmeanspp_init(
-    points: list[Point],
-    k: int,
-    rng: random.Random,
-) -> list[Centroid]:
+def _kmeanspp_init(points: list[Point], k: int, rng: random.Random) -> list[Point]:
     """
-    Choose k seed centroids using the k-means++ probability scheme.
+    Choose k initial centroids with k-means++ probability weighting.
 
-    Each successive centroid is sampled from the data with probability
-    proportional to D²(x) — the squared distance to the nearest already-
-    chosen centroid.  This spreads seeds across the data and cuts the
-    expected number of Lloyd iterations needed to converge.
+    The first centroid is chosen uniformly at random.  Each subsequent
+    centroid is sampled with probability proportional to the squared
+    distance from a point to its nearest already-chosen centroid.
     """
-    # Pick the first centroid uniformly at random.
-    centroids: list[Centroid] = [list(rng.choice(points))]
+    centroids: list[Point] = [rng.choice(points)]
 
-    for _ in range(1, k):
-        # D²(x) for each point: squared distance to nearest chosen centroid.
+    for _ in range(k - 1):
         d2 = [min(_sq_dist(p, c) for c in centroids) for p in points]
         total = sum(d2)
         if total == 0.0:
-            # All remaining points coincide with an existing centroid.
-            centroids.append(list(rng.choice(points)))
+            # All remaining candidates coincide with existing centroids;
+            # fall back to uniform sampling.
+            centroids.append(rng.choice(points))
             continue
-        # Weighted random pick.
+
         threshold = rng.random() * total
         cumulative = 0.0
         chosen = points[-1]
@@ -75,136 +77,152 @@ def _kmeanspp_init(
             if cumulative >= threshold:
                 chosen = p
                 break
-        centroids.append(list(chosen))
+        centroids.append(chosen)
 
     return centroids
 
 
 # ---------------------------------------------------------------------------
-# Assignment and update steps
+# Assignment step
 # ---------------------------------------------------------------------------
 
-def _assign(points: list[Point], centroids: list[Centroid]) -> list[int]:
-    """Return the index of the nearest centroid for every point."""
+def _assign(points: list[Point], centroids: list[Point]) -> tuple[list[int], float]:
+    """
+    Assign each point to its nearest centroid.
+
+    Returns
+    -------
+    labels  : cluster index for each point
+    inertia : total within-cluster sum of squared distances
+    """
     labels: list[int] = []
+    inertia = 0.0
     for p in points:
-        best_idx = min(range(len(centroids)), key=lambda i: _sq_dist(p, centroids[i]))
+        best_idx = 0
+        best_d2 = _sq_dist(p, centroids[0])
+        for i, c in enumerate(centroids[1:], 1):
+            d2 = _sq_dist(p, c)
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = i
         labels.append(best_idx)
-    return labels
+        inertia += best_d2
+    return labels, inertia
 
 
-def _update_centroids(
+# ---------------------------------------------------------------------------
+# Centroid update step
+# ---------------------------------------------------------------------------
+
+def _recompute_centroids(
     points: list[Point],
     labels: list[int],
     k: int,
     dim: int,
-    old_centroids: list[Centroid],
-) -> list[Centroid]:
+    old_centroids: list[Point],
+    rng: random.Random,
+) -> list[Point]:
     """
-    Recompute each centroid as the mean of its assigned points.
+    Compute the mean of each cluster.
 
-    Empty-cluster recovery: if a cluster has no points assigned, the centroid
-    is moved to whichever point is farthest from *its* current centroid.  This
-    avoids a degenerate solution with fewer than k clusters.
+    Empty-cluster rescue
+    --------------------
+    When a cluster has no members its centroid is replaced by the point
+    currently carrying the largest squared error (i.e. the point that
+    most needs its own centroid).  If multiple empty clusters exist, each
+    steals the next-highest-error point, so no two empty clusters end up
+    at the same location.
     """
     sums = [[0.0] * dim for _ in range(k)]
     counts = [0] * k
+    for p, lbl in zip(points, labels):
+        counts[lbl] += 1
+        for d, v in enumerate(p):
+            sums[lbl][d] += v
 
-    for p, label in zip(points, labels):
-        for d in range(dim):
-            sums[label][d] += p[d]
-        counts[label] += 1
+    # Pre-compute per-point squared errors for the rescue heuristic.
+    sq_errors: list[float] = [
+        _sq_dist(p, old_centroids[lbl]) for p, lbl in zip(points, labels)
+    ]
 
-    new_centroids: list[Centroid] = []
+    new_centroids: list[Point] = []
     for i in range(k):
         if counts[i] > 0:
-            new_centroids.append([sums[i][d] / counts[i] for d in range(dim)])
+            new_centroids.append(tuple(s / counts[i] for s in sums[i]))
         else:
-            # Empty cluster: steal the point farthest from its own centroid.
-            farthest = max(
-                range(len(points)),
-                key=lambda idx: _sq_dist(points[idx], old_centroids[labels[idx]]),
-            )
-            new_centroids.append(list(points[farthest]))
+            # Rescue: take the highest-error point as the new centroid.
+            rescue = max(range(len(points)), key=lambda j: sq_errors[j])
+            new_centroids.append(points[rescue])
+            # Zero out so the same point is not stolen twice.
+            sq_errors[rescue] = -1.0
 
     return new_centroids
 
 
-def _inertia(points: list[Point], labels: list[int], centroids: list[Centroid]) -> float:
-    """Sum of squared distances from each point to its assigned centroid."""
-    return sum(_sq_dist(p, centroids[label]) for p, label in zip(points, labels))
-
-
 # ---------------------------------------------------------------------------
-# Main k-means function
+# k-means
 # ---------------------------------------------------------------------------
 
 def kmeans(
-    points: Sequence[Sequence[float]],
+    points: list[Point],
     k: int,
     *,
+    seed: int = 42,
     max_iter: int = 300,
-    tol: float = 1e-6,
-    seed: int | None = 42,
-    n_init: int = 10,
-) -> tuple[list[int], list[Centroid], float]:
+    tol: float = 1e-9,
+) -> KMeansResult:
     """
-    Fit k-means clustering and return the best result over n_init runs.
+    Cluster *points* into *k* groups using Lloyd's algorithm.
 
     Parameters
     ----------
-    points   : sequence of equal-length numeric sequences
-    k        : number of clusters (1 ≤ k ≤ len(points))
-    max_iter : maximum Lloyd iterations per run
-    tol      : convergence threshold — stop when centroid shift < tol
-    seed     : base RNG seed for reproducibility; each run uses seed+i
-    n_init   : number of independent random initialisations
+    points   : non-empty list of equal-length tuples (any dimension ≥ 1)
+    k        : number of clusters, 1 ≤ k ≤ len(points)
+    seed     : integer seed for the internal RNG – same seed always gives
+               the same result regardless of the calling context
+    max_iter : hard cap on Lloyd iterations
+    tol      : stop early when the total centroid movement (Euclidean) in
+               a step falls below this value
 
     Returns
     -------
-    labels    : cluster index for each point  (len == len(points))
-    centroids : final centroid list            (len == k)
-    inertia   : total within-cluster sum of squares for the best run
+    KMeansResult(centroids, labels, inertia, inertia_history)
     """
-    pts: list[Point] = [tuple(float(x) for x in p) for p in points]
-    n = len(pts)
-    if n == 0:
-        raise ValueError("points must be non-empty")
-    dim = len(pts[0])
-    if any(len(p) != dim for p in pts):
-        raise ValueError("all points must have the same dimension")
-    if not (1 <= k <= n):
-        raise ValueError(f"k must satisfy 1 ≤ k ≤ {n}, got {k}")
+    if not points:
+        raise ValueError("points must not be empty")
+    if k < 1:
+        raise ValueError("k must be at least 1")
+    if k > len(points):
+        raise ValueError("k must not exceed the number of points")
 
-    best_labels: list[int] = []
-    best_centroids: list[Centroid] = []
-    best_inertia = math.inf
+    dim = len(points[0])
+    rng = random.Random(seed)
 
-    for run in range(n_init):
-        rng = random.Random(None if seed is None else seed + run)
-        centroids = _kmeanspp_init(pts, k, rng)
+    centroids = _kmeanspp_init(points, k, rng)
+    inertia_history: list[float] = []
 
-        labels: list[int] = []
-        for iteration in range(max_iter):
-            labels = _assign(pts, centroids)
-            new_centroids = _update_centroids(pts, labels, k, dim, centroids)
+    for _ in range(max_iter):
+        labels, inertia = _assign(points, centroids)
+        inertia_history.append(inertia)
 
-            # Check convergence: maximum shift of any centroid.
-            shift = max(
-                _dist(c_old, c_new)
-                for c_old, c_new in zip(centroids, new_centroids)
-            )
-            centroids = new_centroids
-            if shift < tol:
-                break
+        new_centroids = _recompute_centroids(points, labels, k, dim, centroids, rng)
 
-        trial_inertia = _inertia(pts, labels, centroids)
-        if trial_inertia < best_inertia:
-            best_inertia = trial_inertia
-            best_labels = labels
-            best_centroids = centroids
+        movement = sum(_dist(c, nc) for c, nc in zip(centroids, new_centroids))
+        centroids = new_centroids
 
-    return best_labels, best_centroids, best_inertia
+        if movement < tol:
+            break
+
+    # Final assignment against the converged centroids.
+    labels, inertia = _assign(points, centroids)
+    inertia_history.append(inertia)
+
+    return KMeansResult(
+        centroids=centroids,
+        labels=labels,
+        inertia=inertia,
+        inertia_history=inertia_history,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -212,32 +230,50 @@ def kmeans(
 # ---------------------------------------------------------------------------
 
 def elbow_inertias(
-    points: Sequence[Sequence[float]],
-    k_range: range | Sequence[int],
-    **kmeans_kwargs,
+    points: list[Point],
+    k_range: range | list[int],
+    *,
+    seed: int = 42,
+    max_iter: int = 300,
 ) -> dict[int, float]:
     """
-    Run k-means for each k in k_range and collect the inertia at each k.
-
-    Returns a dict mapping k → inertia, suitable for an elbow plot.
+    Run k-means for each k in *k_range* and return {k: final_inertia}.
+    The same seed is used for every run so the sweep is reproducible.
     """
-    result: dict[int, float] = {}
-    for k in k_range:
-        _, _, inertia = kmeans(points, k, **kmeans_kwargs)
-        result[k] = inertia
-    return result
+    return {
+        k: kmeans(points, k, seed=seed, max_iter=max_iter).inertia
+        for k in k_range
+    }
+
+
+# ---------------------------------------------------------------------------
+# ASCII elbow plot
+# ---------------------------------------------------------------------------
+
+def _fmt_si(value: float) -> str:
+    """Compact axis label with an SI suffix."""
+    for threshold, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
+        if abs(value) >= threshold:
+            return f"{value / threshold:.1f}{suffix}"
+    return f"{value:.1f}"
 
 
 def print_elbow_plot(
     inertias: dict[int, float],
     *,
     width: int = 60,
-    height: int = 15,
+    height: int = 20,
+    title: str = "Elbow Plot — Inertia vs k",
 ) -> None:
     """
-    Render an ASCII elbow plot for a k → inertia mapping.
+    Print a character-art line chart of inertia vs k to stdout.
 
-    The x-axis is k; the y-axis is inertia (larger = worse fit).
+    Parameters
+    ----------
+    inertias : {k: inertia} mapping as returned by elbow_inertias()
+    width    : plot area width in characters
+    height   : plot area height in character rows
+    title    : chart title
     """
     if not inertias:
         print("(no data)")
@@ -245,71 +281,63 @@ def print_elbow_plot(
 
     ks = sorted(inertias)
     values = [inertias[k] for k in ks]
+    n = len(ks)
 
-    min_val = min(values)
-    max_val = max(values)
-    val_range = max_val - min_val or 1.0
+    min_v, max_v = min(values), max(values)
+    v_range = max_v - min_v if max_v != min_v else 1.0
 
-    # Build a grid: rows × cols
-    grid = [[" "] * width for _ in range(height)]
+    def x_col(i: int) -> int:
+        return 0 if n == 1 else round(i * (width - 1) / (n - 1))
 
-    def col_for_k(idx: int) -> int:
-        """Map k index (0-based among ks) to a column in the grid."""
-        if len(ks) == 1:
-            return width // 2
-        return int(idx / (len(ks) - 1) * (width - 1))
+    def y_row(v: float) -> int:
+        # row 0 is the top (highest inertia); row height-1 is the bottom.
+        return round((max_v - v) / v_range * (height - 1))
 
-    def row_for_val(v: float) -> int:
-        """Map inertia value to a row (0 = top = high inertia)."""
-        normalised = (v - min_val) / val_range          # 0 (low) … 1 (high)
-        return int((1.0 - normalised) * (height - 1))   # invert: high → top row
+    grid: list[list[str]] = [[" "] * width for _ in range(height)]
 
-    # Plot each k.
-    for idx, (k, v) in enumerate(zip(ks, values)):
-        c = col_for_k(idx)
-        r = row_for_val(v)
-        grid[r][c] = "●"
+    for i, (k, v) in enumerate(zip(ks, values)):
+        x = x_col(i)
+        y = y_row(v)
+        grid[y][x] = "●"
 
-    # Connect adjacent points with dashes (rough horizontal run).
-    for idx in range(len(ks) - 1):
-        c0 = col_for_k(idx)
-        c1 = col_for_k(idx + 1)
-        r0 = row_for_val(values[idx])
-        r1 = row_for_val(values[idx + 1])
-        steps = max(abs(c1 - c0), abs(r1 - r0), 1)
-        for s in range(1, steps):
-            t = s / steps
-            cr = int(r0 + t * (r1 - r0))
-            cc = int(c0 + t * (c1 - c0))
-            if grid[cr][cc] == " ":
-                grid[cr][cc] = "·"
+        if i < n - 1:
+            x2 = x_col(i + 1)
+            y2 = y_row(values[i + 1])
+            steps = x2 - x
+            for s in range(1, steps):
+                xi = x + s
+                t = s / steps
+                yi = round(y + t * (y2 - y))
+                if 0 <= yi < height and 0 <= xi < width and grid[yi][xi] == " ":
+                    grid[yi][xi] = "·"
 
-    # Y-axis labels (two: max at top, min at bottom).
-    y_label_width = 10
+    label_w = 12
     print()
-    print("  Inertia (elbow plot)")
-    for r, row in enumerate(grid):
-        if r == 0:
-            label = f"{max_val:>{y_label_width}.1f} |"
-        elif r == height - 1:
-            label = f"{min_val:>{y_label_width}.1f} |"
-        else:
-            label = " " * y_label_width + " |"
-        print(label + "".join(row))
+    print(f"{title:^{label_w + width + 2}}")
+    print()
 
-    # X-axis.
-    print(" " * (y_label_width + 2) + "-" * width)
-    # K tick labels — first, last, and a few in between.
+    for ri, row in enumerate(grid):
+        if ri == 0 or ri == height - 1 or ri % 4 == 0:
+            lbl = _fmt_si(max_v - (ri / (height - 1)) * v_range)
+        else:
+            lbl = ""
+        print(f"{lbl:>{label_w}} │{''.join(row)}")
+
+    # X-axis rule.
+    print(" " * label_w + " └" + "─" * width)
+
+    # k-value tick labels.
     tick_line = [" "] * width
-    for idx, k in enumerate(ks):
-        c = col_for_k(idx)
-        label = str(k)
-        for j, ch in enumerate(label):
-            pos = c + j
-            if 0 <= pos < width:
-                tick_line[pos] = ch
-    print(" " * (y_label_width + 2) + "".join(tick_line))
-    print(" " * (y_label_width + 2 + width // 2 - 1) + "k")
+    for i, k in enumerate(ks):
+        x = x_col(i)
+        s = str(k)
+        half = len(s) // 2
+        for j, ch in enumerate(s):
+            xi = x - half + j
+            if 0 <= xi < width:
+                tick_line[xi] = ch
+    print(" " * (label_w + 2) + "".join(tick_line))
+    print(" " * (label_w + 2 + width // 2) + "k")
     print()
 
 
@@ -317,88 +345,96 @@ def print_elbow_plot(
 # __main__ demo
 # ---------------------------------------------------------------------------
 
-def _make_demo_points(seed: int = 0) -> list[tuple[float, float]]:
-    """
-    Generate three well-separated Gaussian blobs in 2-D.
+if __name__ == "__main__":
+    import sys
 
-    Blob centres: (0, 0), (8, 0), (4, 7)
-    Each blob has 40 points with std ≈ 0.9.
-    """
-    rng = random.Random(seed)
-    centres = [(0.0, 0.0), (8.0, 0.0), (4.0, 7.0)]
-    sigma = 0.9
-    pts: list[tuple[float, float]] = []
-    for cx, cy in centres:
-        for _ in range(40):
-            x = cx + rng.gauss(0.0, sigma)
-            y = cy + rng.gauss(0.0, sigma)
-            pts.append((x, y))
-    return pts
+    # ------------------------------------------------------------------
+    # 1.  Synthetic dataset: three well-separated Gaussian blobs in 2-D.
+    # ------------------------------------------------------------------
+    DATA_SEED = 0
+    rng_data = random.Random(DATA_SEED)
 
+    BLOB_CENTRES = [(0.0, 0.0), (8.0, 0.0), (4.0, 7.0)]
+    N_PER_BLOB = 40
+    SIGMA = 0.8
 
-def _self_check(
-    points: list[tuple[float, float]],
-    labels: list[int],
-    n_per_blob: int = 40,
-) -> bool:
-    """
-    Verify that all points from the same ground-truth blob share one label.
+    data: list[Point] = []
+    true_labels: list[int] = []
 
-    The ground truth is implicit in the construction: points 0..39 belong to
-    blob 0, 40..79 to blob 1, 80..119 to blob 2.  The clustering is correct
-    if each blob maps to exactly one cluster (even if the cluster indices differ
-    from the blob indices).
-    """
-    n_blobs = len(points) // n_per_blob
-    for b in range(n_blobs):
-        blob_labels = labels[b * n_per_blob : (b + 1) * n_per_blob]
-        if len(set(blob_labels)) != 1:
-            return False
-    return True
+    for cls, (cx, cy) in enumerate(BLOB_CENTRES):
+        for _ in range(N_PER_BLOB):
+            data.append((cx + rng_data.gauss(0, SIGMA), cy + rng_data.gauss(0, SIGMA)))
+            true_labels.append(cls)
 
+    print(f"Dataset: {len(data)} points in {len(BLOB_CENTRES)} blobs "
+          f"(σ={SIGMA}, {N_PER_BLOB} pts/blob)")
 
-def main() -> None:
-    print("=" * 70)
-    print("  k-means demo — 3 Gaussian blobs in 2-D, stdlib only")
-    print("=" * 70)
-
-    pts = _make_demo_points(seed=7)
-    print(f"\nDataset: {len(pts)} points, 3 true clusters\n")
-
-    # --- Elbow analysis for k = 1 … 7 ---
-    print("Running elbow analysis for k = 1 … 7 …")
-    inertias = elbow_inertias(pts, range(1, 8), seed=42, n_init=5)
-    for k, v in sorted(inertias.items()):
-        print(f"  k={k}  inertia={v:10.2f}")
+    # ------------------------------------------------------------------
+    # 2.  Elbow analysis for k = 1 … 8.
+    # ------------------------------------------------------------------
+    k_range = range(1, 9)
+    inertias = elbow_inertias(data, k_range, seed=42)
     print_elbow_plot(inertias)
 
-    # --- Fit at the true k = 3 ---
-    print("Fitting k=3 …")
-    labels, centroids, inertia = kmeans(pts, k=3, seed=42, n_init=10)
-
-    print(f"\nFinal inertia : {inertia:.4f}")
-    print("Centroids found:")
-    for i, c in enumerate(centroids):
-        print(f"  cluster {i}: ({c[0]:+.3f}, {c[1]:+.3f})")
-
-    cluster_sizes = [labels.count(i) for i in range(3)]
-    print(f"\nCluster sizes : {cluster_sizes}")
-
-    # --- Self-check ---
-    ok = _self_check(pts, labels)
-    status = "PASS ✓" if ok else "FAIL ✗"
-    print(f"\nLabelling self-check : {status}")
-    if not ok:
-        # Print which blob failed for debugging.
-        n_per_blob = 40
-        for b in range(3):
-            blob_labels = labels[b * n_per_blob : (b + 1) * n_per_blob]
-            unique = set(blob_labels)
-            if len(unique) != 1:
-                print(f"  Blob {b} split across clusters: {unique}")
-
+    # Also show the numeric table for reference.
+    print(f"  {'k':>3}  {'inertia':>14}")
+    print(f"  {'─'*3}  {'─'*14}")
+    for k_val, iner in inertias.items():
+        print(f"  {k_val:>3}  {iner:>14.2f}")
     print()
 
+    # ------------------------------------------------------------------
+    # 3.  Run k-means with the true k.
+    # ------------------------------------------------------------------
+    k = len(BLOB_CENTRES)
+    result = kmeans(data, k, seed=42)
 
-if __name__ == "__main__":
-    main()
+    print(f"k={k}  final inertia : {result.inertia:.4f}")
+    print(f"      iterations    : {len(result.inertia_history)}")
+    for i, c in enumerate(result.centroids):
+        print(f"      centroid {i}    : ({c[0]:+.3f}, {c[1]:+.3f})")
+    print()
+
+    # Inertia history (shows convergence speed).
+    print("Inertia per Lloyd step:")
+    for step, iner in enumerate(result.inertia_history):
+        bar_len = round(iner / result.inertia_history[0] * 40)
+        print(f"  step {step:>2}: {iner:10.2f}  {'█' * bar_len}")
+    print()
+
+    # ------------------------------------------------------------------
+    # 4.  Self-check: predicted labels should match true labels up to a
+    #     permutation of cluster indices.
+    #
+    #     Strategy: for each predicted cluster, vote for the true label
+    #     that the majority of its members carry.  Then remap predictions
+    #     and measure accuracy.  With tight, well-separated blobs this
+    #     should be ≥ 95 %.
+    # ------------------------------------------------------------------
+    vote: list[list[int]] = [[0] * k for _ in range(k)]
+    for pred, true in zip(result.labels, true_labels):
+        vote[pred][true] += 1
+
+    # Greedy bijection: assign each predicted cluster to its top true label
+    # in descending order of confidence to avoid collisions.
+    perm: dict[int, int] = {}
+    used: set[int] = set()
+    for pred in sorted(range(k), key=lambda p: max(vote[p]), reverse=True):
+        best = max(
+            (j for j in range(k) if j not in used),
+            key=lambda j, p=pred: vote[p][j],
+        )
+        perm[pred] = best
+        used.add(best)
+
+    remapped = [perm[lbl] for lbl in result.labels]
+    correct = sum(r == t for r, t in zip(remapped, true_labels))
+    accuracy = correct / len(data)
+
+    print(f"Self-check: {correct}/{len(data)} correct  ({accuracy:.1%})")
+
+    if accuracy < 0.95:
+        print("FAIL — labelling accuracy below 95 %", file=sys.stderr)
+        sys.exit(1)
+
+    print("PASS ✓")

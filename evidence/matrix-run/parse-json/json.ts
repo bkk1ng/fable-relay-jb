@@ -3,315 +3,413 @@
  *
  * Exports:
  *   stringify(value, options?)  — serialize to JSON string
- *   parse(text, options?)       — parse JSON string to value
- *   JsonParseError              — error type with position, line, column
- *
- * Features:
- *   stringify: cycle detection, replacer (function|array), indent, bigint-as-string
- *   parse:     position-tracked errors with line/column, big-number-as-string, reviver
+ *   parse(input, options?)      — deserialize from JSON string
+ *   CircularReferenceError      — thrown on cycles (default)
+ *   JsonParseError              — thrown on malformed input, with position info
+ *   runTests()                  — built-in self-test suite
  */
-
-// ─── Public types ─────────────────────────────────────────────────────────────
-
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue    = JsonPrimitive | JsonObject | JsonArray;
-export type JsonObject   = { [key: string]: JsonValue };
-export type JsonArray    = JsonValue[];
-
-export type ReplacerFn   = (key: string, value: unknown) => unknown;
-export type ReplacerList = (string | number)[];
-export type Replacer     = ReplacerFn | ReplacerList | null | undefined;
-
-export interface StringifyOptions {
-  /**
-   * Function replacer filters/transforms each value; array replacer acts as an
-   * allowlist of property names (same semantics as native JSON.stringify).
-   */
-  replacer?: Replacer;
-  /** Indent amount: number of spaces (capped at 10) or an explicit string. */
-  space?: string | number;
-  /**
-   * When true, BigInt values are serialized as their decimal string
-   * representation instead of throwing.
-   */
-  bigintAsString?: boolean;
-}
-
-export interface ParseOptions {
-  /**
-   * When true, integers outside ±(2^53 − 1) are returned as their raw decimal
-   * string instead of a lossy Number.
-   */
-  bigNumberAsString?: boolean;
-  /**
-   * Standard reviver: called bottom-up with (key, value) for every node.
-   * Returning undefined deletes the property.
-   */
-  reviver?: (key: string, value: unknown) => unknown;
-}
-
-// ─── Error class ──────────────────────────────────────────────────────────────
-
-export class JsonParseError extends Error {
-  readonly position: number;
-  readonly line: number;
-  readonly column: number;
-
-  constructor(
-    message: string,
-    position: number,
-    line: number,
-    column: number,
-  ) {
-    super(`${message} (line ${line}, column ${column}, position ${position})`);
-    this.name = "JsonParseError";
-    this.position = position;
-    this.line     = line;
-    this.column   = column;
-    // Restore prototype chain (tsc targets < ES2015 need this).
-    Object.setPrototypeOf(this, new.target.prototype);
-  }
-}
 
 // ─── Stringify ────────────────────────────────────────────────────────────────
 
-/**
- * Serialize `value` to a JSON string.
- * Returns `undefined` for top-level `undefined`, functions, and symbols,
- * matching the behaviour of native JSON.stringify.
- */
-export function stringify(
-  value: unknown,
-  options: StringifyOptions = {},
-): string | undefined {
-  const { replacer, space, bigintAsString = false } = options;
+/** Function replacer: (key, value) => replacement, or array of allowed keys. */
+export type Replacer =
+  | ((key: string, value: unknown) => unknown)
+  | ReadonlyArray<string | number>
+  | null;
 
-  // ── Normalize indent ──
-  let indent = "";
-  if (typeof space === "number") {
-    indent = " ".repeat(Math.min(10, Math.max(0, Math.floor(space))));
-  } else if (typeof space === "string") {
-    indent = space.slice(0, 10);
+export interface StringifyOptions {
+  replacer?: Replacer;
+  /** Indent: number of spaces (clamped to 10), or a string (truncated to 10 chars). */
+  space?: string | number;
+  /**
+   * What to do when a circular reference is encountered.
+   *   "throw"  (default) — throws CircularReferenceError
+   *   "null"             — serializes the back-reference as null
+   */
+  cyclicRef?: "throw" | "null";
+}
+
+export class CircularReferenceError extends Error {
+  constructor(keyPath: string) {
+    super(`Circular reference at key "${keyPath}"`);
+    this.name = "CircularReferenceError";
+  }
+}
+
+function resolveIndent(space: string | number | undefined): string {
+  if (typeof space === "number") return " ".repeat(Math.min(Math.max(0, Math.floor(space)), 10));
+  if (typeof space === "string") return space.slice(0, 10);
+  return "";
+}
+
+const ESCAPE: Readonly<Record<string, string>> = {
+  '"': '\\"',
+  "\\": "\\\\",
+  "\b": "\\b",
+  "\f": "\\f",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+};
+
+function escapeString(s: string): string {
+  let out = '"';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (ESCAPE[ch] !== undefined) {
+      out += ESCAPE[ch];
+    } else if (code < 0x20) {
+      out += "\\u" + code.toString(16).padStart(4, "0");
+    } else {
+      out += ch;
+    }
+  }
+  return out + '"';
+}
+
+/**
+ * Core recursive serializer.
+ * Returns undefined for values that JSON omits (function, symbol, undefined at
+ * object level). Array slots that are undefined serialize as "null".
+ */
+function serializeValue(
+  value: unknown,
+  key: string,
+  replacerFn: ((key: string, value: unknown) => unknown) | null,
+  allowedKeys: ReadonlySet<string> | null,
+  seen: WeakSet<object>,
+  indent: string,
+  currentDepthIndent: string,
+  cyclicRef: "throw" | "null"
+): string | undefined {
+  // toJSON hook (runs before replacer, matching JSON.stringify spec)
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "toJSON" in value &&
+    typeof (value as { toJSON?: unknown }).toJSON === "function"
+  ) {
+    value = (value as { toJSON(key: string): unknown }).toJSON(key);
   }
 
-  // ── Normalize replacer ──
-  let replacerFn: ReplacerFn | null = null;
-  let allowList: Set<string> | null = null;
+  // Replacer function
+  if (replacerFn !== null) {
+    value = replacerFn(key, value);
+  }
+
+  // Primitives that serialize to nothing in object context
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    return undefined;
+  }
+
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+
+  if (typeof value === "number") {
+    // JSON does not support NaN or Infinity; spec says emit null
+    return isFinite(value) ? String(value) : "null";
+  }
+
+  if (typeof value === "string") return escapeString(value);
+
+  // BigInt: serialize as a quoted decimal string to preserve precision
+  if (typeof value === "bigint") return '"' + value.toString() + '"';
+
+  if (typeof value !== "object") return undefined; // should not reach here
+
+  const obj = value as object;
+
+  if (seen.has(obj)) {
+    if (cyclicRef === "null") return "null";
+    throw new CircularReferenceError(key);
+  }
+  seen.add(obj);
+
+  const childIndent = indent ? currentDepthIndent + indent : "";
+  let result: string;
+
+  try {
+    if (Array.isArray(obj)) {
+      if (obj.length === 0) {
+        result = "[]";
+      } else {
+        const items: string[] = [];
+        for (let i = 0; i < obj.length; i++) {
+          const v = serializeValue(
+            (obj as unknown[])[i],
+            String(i),
+            replacerFn,
+            allowedKeys,
+            seen,
+            indent,
+            childIndent,
+            cyclicRef
+          );
+          items.push(v === undefined ? "null" : v);
+        }
+        result = indent
+          ? "[\n" + childIndent + items.join(",\n" + childIndent) + "\n" + currentDepthIndent + "]"
+          : "[" + items.join(",") + "]";
+      }
+    } else {
+      const pairs: string[] = [];
+      for (const k of Object.keys(obj)) {
+        if (allowedKeys !== null && !allowedKeys.has(k)) continue;
+        const v = serializeValue(
+          (obj as Record<string, unknown>)[k],
+          k,
+          replacerFn,
+          allowedKeys,
+          seen,
+          indent,
+          childIndent,
+          cyclicRef
+        );
+        if (v !== undefined) {
+          pairs.push(escapeString(k) + (indent ? ": " : ":") + v);
+        }
+      }
+      result =
+        pairs.length === 0
+          ? "{}"
+          : indent
+          ? "{\n" + childIndent + pairs.join(",\n" + childIndent) + "\n" + currentDepthIndent + "}"
+          : "{" + pairs.join(",") + "}";
+    }
+  } finally {
+    seen.delete(obj);
+  }
+
+  return result;
+}
+
+/**
+ * Serialize a value to a JSON string.
+ *
+ * Returns `undefined` for values that have no JSON representation
+ * (function, symbol, bare undefined), matching `JSON.stringify` behavior.
+ */
+export function stringify(value: unknown, options: StringifyOptions = {}): string | undefined {
+  const { replacer = null, space, cyclicRef = "throw" } = options;
+  const indent = resolveIndent(space);
+
+  let replacerFn: ((key: string, value: unknown) => unknown) | null = null;
+  let allowedKeys: ReadonlySet<string> | null = null;
 
   if (typeof replacer === "function") {
     replacerFn = replacer;
   } else if (Array.isArray(replacer)) {
-    allowList = new Set(replacer.map(String));
+    allowedKeys = new Set(replacer.map(String));
   }
 
-  // Track object references for cycle detection.
-  const seen = new WeakSet<object>();
-
-  // ── Escape a string value ──
-  function escapeString(s: string): string {
-    let out = '"';
-    for (let i = 0; i < s.length; i++) {
-      const cp = s.charCodeAt(i);
-      switch (cp) {
-        case 0x22: out += '\\"';  break;
-        case 0x5c: out += '\\\\'; break;
-        case 0x08: out += '\\b';  break;
-        case 0x09: out += '\\t';  break;
-        case 0x0a: out += '\\n';  break;
-        case 0x0c: out += '\\f';  break;
-        case 0x0d: out += '\\r';  break;
-        default:
-          if (cp < 0x20) {
-            out += "\\u" + cp.toString(16).padStart(4, "0");
-          } else {
-            out += s[i];
-          }
-      }
-    }
-    out += '"';
-    return out;
+  // Apply toJSON / replacer at the root level (key = "")
+  let root: unknown = value;
+  if (
+    root !== null &&
+    typeof root === "object" &&
+    "toJSON" in root &&
+    typeof (root as { toJSON?: unknown }).toJSON === "function"
+  ) {
+    root = (root as { toJSON(key: string): unknown }).toJSON("");
   }
-
-  // ── Serialize an array ──
-  function serializeArray(arr: unknown[], depth: number): string {
-    if (arr.length === 0) return "[]";
-
-    const items: string[] = [];
-    for (let i = 0; i < arr.length; i++) {
-      const serialized = serializeValue(String(i), arr[i], depth + 1);
-      // Array holes / undefined slots → "null" per spec.
-      items.push(serialized ?? "null");
-    }
-
-    if (indent === "") {
-      return "[" + items.join(",") + "]";
-    }
-    const inner = indent.repeat(depth + 1);
-    const outer = indent.repeat(depth);
-    return "[\n" + items.map(v => inner + v).join(",\n") + "\n" + outer + "]";
-  }
-
-  // ── Serialize an object ──
-  function serializeObject(
-    obj: Record<string, unknown>,
-    depth: number,
-  ): string {
-    const pairs: string[] = [];
-
-    for (const k of Object.keys(obj)) {
-      if (allowList !== null && !allowList.has(k)) continue;
-
-      const serialized = serializeValue(k, obj[k], depth + 1);
-      if (serialized === undefined) continue; // drop undefined values
-
-      const sep = indent === "" ? ":" : ": ";
-      pairs.push(escapeString(k) + sep + serialized);
-    }
-
-    if (pairs.length === 0) return "{}";
-
-    if (indent === "") {
-      return "{" + pairs.join(",") + "}";
-    }
-    const inner = indent.repeat(depth + 1);
-    const outer = indent.repeat(depth);
-    return "{\n" + pairs.map(p => inner + p).join(",\n") + "\n" + outer + "}";
-  }
-
-  // ── Core recursive serializer ──
-  function serializeValue(
-    key: string,
-    val: unknown,
-    depth: number,
-  ): string | undefined {
-    // 1. Apply replacer function.
-    if (replacerFn !== null) {
-      val = replacerFn(key, val);
-    }
-
-    // 2. Call toJSON if present (before second replacer pass, same as spec).
-    if (
-      val !== null &&
-      val !== undefined &&
-      typeof val === "object" &&
-      typeof (val as Record<string, unknown>)["toJSON"] === "function"
-    ) {
-      val = (val as { toJSON(k: string): unknown }).toJSON(key);
-      if (replacerFn !== null) {
-        val = replacerFn(key, val);
-      }
-    }
-
-    // 3. Primitives that serialize to undefined (drop from output).
-    if (val === undefined)              return undefined;
-    if (typeof val === "function")      return undefined;
-    if (typeof val === "symbol")        return undefined;
-
-    // 4. Null / booleans.
-    if (val === null)                   return "null";
-    if (typeof val === "boolean")       return val ? "true" : "false";
-
-    // 5. BigInt.
-    if (typeof val === "bigint") {
-      if (bigintAsString) return escapeString(val.toString());
-      throw new TypeError(
-        `Cannot serialize BigInt at key "${key}". ` +
-        "Pass { bigintAsString: true } to encode as a decimal string.",
-      );
-    }
-
-    // 6. Numbers.
-    if (typeof val === "number") {
-      if (!isFinite(val)) return "null"; // NaN / ±Infinity → null per spec.
-      if (Object.is(val, -0)) return "0";
-      return String(val);
-    }
-
-    // 7. Strings.
-    if (typeof val === "string") return escapeString(val);
-
-    // 8. Objects and arrays.
-    const obj = val as object;
-    if (seen.has(obj)) {
-      throw new TypeError(
-        `Circular reference detected at key "${key}".`,
-      );
-    }
-    seen.add(obj);
-    try {
-      return Array.isArray(obj)
-        ? serializeArray(obj, depth)
-        : serializeObject(obj as Record<string, unknown>, depth);
-    } finally {
-      seen.delete(obj);
-    }
-  }
-
-  // The root call: replacer receives key="" and the boxed value, per spec.
-  let rootVal: unknown = value;
   if (replacerFn !== null) {
-    rootVal = replacerFn("", value);
+    root = replacerFn("", root);
   }
-  if (rootVal === undefined) return undefined;
 
-  return serializeValue("", rootVal, 0);
+  return serializeValue(root, "", null, allowedKeys, new WeakSet<object>(), indent, "", cyclicRef);
 }
 
-// ─── Parser ───────────────────────────────────────────────────────────────────
+// ─── Parse ────────────────────────────────────────────────────────────────────
 
-/**
- * Parse a JSON string into a JavaScript value.
- * Throws `JsonParseError` with line/column/position on any syntax error.
- */
-export function parse(text: string, options: ParseOptions = {}): unknown {
-  const { bigNumberAsString = false, reviver } = options;
+export interface ParseOptions {
+  /**
+   * When true, integers that cannot be exactly represented as a 64-bit float
+   * (i.e. abs(value) > Number.MAX_SAFE_INTEGER) are returned as strings
+   * instead of numbers.
+   */
+  bigNumberAsString?: boolean;
+}
 
-  const src = String(text);
-  let pos       = 0;
-  let line      = 1;
-  let lineStart = 0;
+/** Thrown when input is not valid JSON. Carries position information. */
+export class JsonParseError extends Error {
+  /** Byte offset from the start of the input string. */
+  readonly offset: number;
+  /** 1-based line number. */
+  readonly line: number;
+  /** 1-based column number. */
+  readonly column: number;
 
-  // ── Position helpers ──
-  function col(): number {
-    return pos - lineStart + 1;
+  constructor(message: string, offset: number, line: number, column: number) {
+    super(`${message} (line ${line}, col ${column}, offset ${offset})`);
+    this.name = "JsonParseError";
+    this.offset = offset;
+    this.line = line;
+    this.column = column;
+  }
+}
+
+class Parser {
+  private readonly src: string;
+  private pos = 0;
+  private line = 1;
+  private col = 1;
+  private readonly bigNumberAsString: boolean;
+
+  constructor(src: string, opts: ParseOptions) {
+    this.src = src;
+    this.bigNumberAsString = opts.bigNumberAsString === true;
   }
 
-  function fail(msg: string): never {
-    throw new JsonParseError(msg, pos, line, col());
+  // ── Utilities ──────────────────────────────────────────────────────────────
+
+  private err(msg: string): never {
+    throw new JsonParseError(msg, this.pos, this.line, this.col);
   }
 
-  function eat(): string {
-    const ch = src[pos++];
-    if (ch === "\n") { line++; lineStart = pos; }
+  private peek(): string {
+    return this.src[this.pos] ?? "";
+  }
+
+  private advance(): string {
+    const ch = this.src[this.pos++];
+    if (ch === "\n") {
+      this.line++;
+      this.col = 1;
+    } else {
+      this.col++;
+    }
     return ch;
   }
 
-  function skipWS(): void {
-    while (pos < src.length) {
-      const ch = src[pos];
+  private skipWS(): void {
+    while (this.pos < this.src.length) {
+      const ch = this.src[this.pos];
       if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
-        eat();
+        this.advance();
       } else {
         break;
       }
     }
   }
 
-  // ── String ──
-  function parseString(): string {
-    if (src[pos] !== '"') fail(`Expected '"', got '${src[pos] ?? "EOF"}'`);
-    pos++; // opening quote
+  // ── Entry point ────────────────────────────────────────────────────────────
+
+  parse(): unknown {
+    this.skipWS();
+    const val = this.parseValue();
+    this.skipWS();
+    if (this.pos < this.src.length) {
+      this.err(`Unexpected token '${this.src[this.pos]}'`);
+    }
+    return val;
+  }
+
+  // ── Value dispatch ─────────────────────────────────────────────────────────
+
+  private parseValue(): unknown {
+    const ch = this.peek();
+    switch (ch) {
+      case '"': return this.parseString();
+      case "{": return this.parseObject();
+      case "[": return this.parseArray();
+      case "t": return this.parseLiteral("true", true);
+      case "f": return this.parseLiteral("false", false);
+      case "n": return this.parseLiteral("null", null);
+      case "":  this.err("Unexpected end of input");
+      default:
+        if (ch === "-" || (ch >= "0" && ch <= "9")) return this.parseNumber();
+        this.err(`Unexpected token '${ch}'`);
+    }
+  }
+
+  // ── Literals ───────────────────────────────────────────────────────────────
+
+  private parseLiteral<T>(word: string, result: T): T {
+    for (const ch of word) {
+      if (this.src[this.pos] !== ch) {
+        this.err(`Invalid token (expected '${word}')`);
+      }
+      this.advance();
+    }
+    return result;
+  }
+
+  // ── Number ─────────────────────────────────────────────────────────────────
+
+  private parseNumber(): number | string {
+    const start = this.pos;
+    let isFloat = false;
+
+    if (this.src[this.pos] === "-") this.advance();
+
+    if (this.src[this.pos] === "0") {
+      this.advance();
+    } else if (this.src[this.pos] >= "1" && this.src[this.pos] <= "9") {
+      while (this.pos < this.src.length && this.src[this.pos] >= "0" && this.src[this.pos] <= "9") {
+        this.advance();
+      }
+    } else {
+      this.err(`Invalid number starting with '${this.src[this.pos] ?? "EOF"}'`);
+    }
+
+    if (this.src[this.pos] === ".") {
+      isFloat = true;
+      this.advance();
+      if (this.src[this.pos] < "0" || this.src[this.pos] > "9") {
+        this.err("Expected digit after decimal point");
+      }
+      while (this.pos < this.src.length && this.src[this.pos] >= "0" && this.src[this.pos] <= "9") {
+        this.advance();
+      }
+    }
+
+    if (this.src[this.pos] === "e" || this.src[this.pos] === "E") {
+      isFloat = true;
+      this.advance();
+      if (this.src[this.pos] === "+" || this.src[this.pos] === "-") this.advance();
+      if (this.src[this.pos] < "0" || this.src[this.pos] > "9") {
+        this.err("Expected digit in exponent");
+      }
+      while (this.pos < this.src.length && this.src[this.pos] >= "0" && this.src[this.pos] <= "9") {
+        this.advance();
+      }
+    }
+
+    const raw = this.src.slice(start, this.pos);
+
+    // Big-integer path: integers outside Number.MAX_SAFE_INTEGER precision
+    if (this.bigNumberAsString && !isFloat) {
+      const big = BigInt(raw);
+      if (big > BigInt(Number.MAX_SAFE_INTEGER) || big < BigInt(Number.MIN_SAFE_INTEGER)) {
+        return raw;
+      }
+    }
+
+    return Number(raw);
+  }
+
+  // ── String ─────────────────────────────────────────────────────────────────
+
+  private parseString(): string {
+    // consume opening quote
+    if (this.src[this.pos] !== '"') this.err("Expected '\"'");
+    this.advance();
 
     let out = "";
-    while (pos < src.length) {
-      const ch = src[pos];
 
-      if (ch === '"') { pos++; return out; }  // closing quote
+    while (this.pos < this.src.length) {
+      const ch = this.src[this.pos];
+
+      if (ch === '"') {
+        this.advance();
+        return out;
+      }
 
       if (ch === "\\") {
-        pos++; // backslash
-        if (pos >= src.length) fail("Unexpected end inside escape sequence");
-        const esc = src[pos++];
+        this.advance();
+        const esc = this.src[this.pos];
+        this.advance();
         switch (esc) {
           case '"':  out += '"';  break;
           case "\\": out += "\\"; break;
@@ -321,585 +419,421 @@ export function parse(text: string, options: ParseOptions = {}): unknown {
           case "n":  out += "\n"; break;
           case "r":  out += "\r"; break;
           case "t":  out += "\t"; break;
-          case "u": {
-            if (pos + 4 > src.length) fail("Incomplete \\u escape");
-            const hex = src.slice(pos, pos + 4);
-            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-              fail(`Invalid \\u escape: \\u${hex}`);
-            }
-            const hi = parseInt(hex, 16);
-            pos += 4;
-
-            // Handle surrogate pairs (𝌆 etc.).
-            if (hi >= 0xd800 && hi <= 0xdbff) {
-              if (src[pos] === "\\" && src[pos + 1] === "u") {
-                const lo4 = src.slice(pos + 2, pos + 6);
-                if (/^[0-9a-fA-F]{4}$/.test(lo4)) {
-                  const lo = parseInt(lo4, 16);
-                  if (lo >= 0xdc00 && lo <= 0xdfff) {
-                    const full =
-                      0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00);
-                    out += String.fromCodePoint(full);
-                    pos += 6;
-                    break;
-                  }
-                }
-              }
-              // Lone high surrogate — emit as-is (lenient, matches V8).
-            }
-            out += String.fromCharCode(hi);
-            break;
-          }
+          case "u":  out += this.parseUnicodeEscape(); break;
           default:
-            fail(`Invalid escape character: \\${esc}`);
+            this.err(`Unknown escape sequence '\\${esc}'`);
         }
         continue;
       }
 
-      // Unescaped control characters are illegal.
-      if (src.charCodeAt(pos) < 0x20) {
-        fail(
-          `Unexpected control character U+${src.charCodeAt(pos)
-            .toString(16)
-            .padStart(4, "0")} in string`,
-        );
+      if (ch.charCodeAt(0) < 0x20) {
+        this.err(`Unescaped control character U+${ch.charCodeAt(0).toString(16).padStart(4, "0")} in string`);
       }
 
       out += ch;
-      pos++;
+      this.advance();
     }
-    fail("Unterminated string");
+
+    this.err("Unterminated string literal");
   }
 
-  // ── Number ──
-  function parseNumber(): number | string {
-    const start = pos;
+  /**
+   * Parse a \uXXXX escape (the leading \u has already been consumed).
+   * Handles surrogate pairs (\uD800–\uDBFF followed by \uDC00–\uDFFF).
+   */
+  private parseUnicodeEscape(): string {
+    const hex1 = this.readHex4();
+    const cp1 = parseInt(hex1, 16);
 
-    if (src[pos] === "-") pos++;
-
-    if (pos >= src.length) fail("Invalid number: unexpected end");
-
-    if (src[pos] === "0") {
-      pos++;
-    } else if (src[pos] >= "1" && src[pos] <= "9") {
-      while (pos < src.length && src[pos] >= "0" && src[pos] <= "9") pos++;
-    } else {
-      fail(`Invalid number: unexpected character '${src[pos]}'`);
-    }
-
-    // Fraction.
-    if (pos < src.length && src[pos] === ".") {
-      pos++;
-      if (pos >= src.length || src[pos] < "0" || src[pos] > "9") {
-        fail("Invalid number: expected digit after '.'");
+    // High surrogate
+    if (cp1 >= 0xd800 && cp1 <= 0xdbff) {
+      if (this.src[this.pos] !== "\\" || this.src[this.pos + 1] !== "u") {
+        this.err("Expected low surrogate after high surrogate");
       }
-      while (pos < src.length && src[pos] >= "0" && src[pos] <= "9") pos++;
-    }
-
-    // Exponent.
-    if (pos < src.length && (src[pos] === "e" || src[pos] === "E")) {
-      pos++;
-      if (pos < src.length && (src[pos] === "+" || src[pos] === "-")) pos++;
-      if (pos >= src.length || src[pos] < "0" || src[pos] > "9") {
-        fail("Invalid number: expected digit in exponent");
+      this.pos += 2; this.col += 2; // consume \u
+      const hex2 = this.readHex4();
+      const cp2 = parseInt(hex2, 16);
+      if (cp2 < 0xdc00 || cp2 > 0xdfff) {
+        this.err(`Invalid low surrogate \\u${hex2}`);
       }
-      while (pos < src.length && src[pos] >= "0" && src[pos] <= "9") pos++;
+      return String.fromCodePoint(0x10000 + ((cp1 - 0xd800) << 10) + (cp2 - 0xdc00));
     }
 
-    const raw = src.slice(start, pos);
-    const num = Number(raw);
-
-    if (bigNumberAsString) {
-      // Only integer numerals can overflow safely; non-integer large numbers
-      // keep their floating-point representation (e.g. 1e400 → Infinity → 0).
-      if (
-        !raw.includes(".") &&
-        !raw.includes("e") &&
-        !raw.includes("E") &&
-        (num > Number.MAX_SAFE_INTEGER || num < Number.MIN_SAFE_INTEGER)
-      ) {
-        return raw;
-      }
-    }
-
-    return num;
+    // Lone low surrogate is technically invalid but we emit it verbatim
+    return String.fromCharCode(cp1);
   }
 
-  // ── Literals ──
-  function parseLiteral(word: string, result: boolean | null): boolean | null {
-    for (let i = 0; i < word.length; i++) {
-      if (pos >= src.length || src[pos] !== word[i]) {
-        fail(`Expected '${word}', got invalid token`);
-      }
-      pos++;
+  private readHex4(): string {
+    const hex = this.src.slice(this.pos, this.pos + 4);
+    if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+      this.err(`Invalid unicode escape \\u${hex}`);
     }
-    return result;
+    this.pos += 4;
+    this.col += 4;
+    return hex;
   }
 
-  // ── Array ──
-  function parseArray(): unknown[] {
-    pos++; // '['
-    skipWS();
+  // ── Array ──────────────────────────────────────────────────────────────────
+
+  private parseArray(): unknown[] {
+    this.advance(); // [
+    this.skipWS();
 
     const arr: unknown[] = [];
-    if (pos < src.length && src[pos] === "]") { pos++; return arr; }
 
-    while (true) {
-      skipWS();
-      arr.push(parseValue());
-      skipWS();
-      if (pos >= src.length) fail("Unterminated array");
-      const ch = src[pos];
-      if (ch === "]") { pos++; break; }
-      if (ch !== ",") fail(`Expected ',' or ']', got '${ch}'`);
-      pos++; // ','
+    if (this.peek() === "]") {
+      this.advance();
+      return arr;
     }
-    return arr;
+
+    for (;;) {
+      this.skipWS();
+      arr.push(this.parseValue());
+      this.skipWS();
+
+      const ch = this.peek();
+      if (ch === "]") {
+        this.advance();
+        return arr;
+      }
+      if (ch === ",") {
+        this.advance();
+        this.skipWS();
+        if (this.peek() === "]") this.err("Trailing comma in array");
+      } else {
+        this.err(`Expected ',' or ']' but got '${ch || "EOF"}'`);
+      }
+    }
   }
 
-  // ── Object ──
-  function parseObject(): Record<string, unknown> {
-    pos++; // '{'
-    skipWS();
+  // ── Object ─────────────────────────────────────────────────────────────────
+
+  private parseObject(): Record<string, unknown> {
+    this.advance(); // {
+    this.skipWS();
 
     const obj: Record<string, unknown> = {};
-    if (pos < src.length && src[pos] === "}") { pos++; return obj; }
 
-    while (true) {
-      skipWS();
-      if (pos >= src.length || src[pos] !== '"') {
-        fail(
-          `Expected string key, got '${src[pos] ?? "EOF"}'`,
-        );
-      }
-      const key = parseString();
-      skipWS();
-
-      if (pos >= src.length || src[pos] !== ":") {
-        fail(`Expected ':' after key "${key}", got '${src[pos] ?? "EOF"}'`);
-      }
-      pos++; // ':'
-      skipWS();
-
-      obj[key] = parseValue();
-      skipWS();
-
-      if (pos >= src.length) fail("Unterminated object");
-      const ch = src[pos];
-      if (ch === "}") { pos++; break; }
-      if (ch !== ",") fail(`Expected ',' or '}', got '${ch}'`);
-      pos++; // ','
+    if (this.peek() === "}") {
+      this.advance();
+      return obj;
     }
-    return obj;
-  }
 
-  // ── Entry point ──
-  function parseValue(): unknown {
-    skipWS();
-    if (pos >= src.length) fail("Unexpected end of JSON input");
-
-    const ch = src[pos];
-    if (ch === '"') return parseString();
-    if (ch === "{") return parseObject();
-    if (ch === "[") return parseArray();
-    if (ch === "t") return parseLiteral("true",  true);
-    if (ch === "f") return parseLiteral("false", false);
-    if (ch === "n") return parseLiteral("null",  null);
-    if (ch === "-" || (ch >= "0" && ch <= "9")) return parseNumber();
-    fail(`Unexpected token '${ch}'`);
-  }
-
-  const root = parseValue();
-  skipWS();
-
-  if (pos < src.length) {
-    fail(`Unexpected token '${src[pos]}' after JSON value`);
-  }
-
-  // ── Reviver (bottom-up, per spec) ──
-  if (reviver) {
-    function walk(val: unknown, key: string): unknown {
-      if (Array.isArray(val)) {
-        for (let i = 0; i < val.length; i++) {
-          const child = walk(val[i], String(i));
-          if (child === undefined) {
-            // spec: delete the index
-            delete (val as unknown[])[i];
-          } else {
-            (val as unknown[])[i] = child;
-          }
-        }
-      } else if (val !== null && typeof val === "object") {
-        const obj = val as Record<string, unknown>;
-        for (const k of Object.keys(obj)) {
-          const child = walk(obj[k], k);
-          if (child === undefined) {
-            delete obj[k];
-          } else {
-            obj[k] = child;
-          }
-        }
+    for (;;) {
+      this.skipWS();
+      if (this.peek() !== '"') {
+        this.err(`Expected string key but got '${this.peek() || "EOF"}'`);
       }
-      return reviver(key, val);
-    }
-    return walk(root, "");
-  }
+      const key = this.parseString();
+      this.skipWS();
+      if (this.src[this.pos] !== ":") {
+        this.err(`Expected ':' after object key but got '${this.peek() || "EOF"}'`);
+      }
+      this.advance(); // :
+      this.skipWS();
+      obj[key] = this.parseValue();
+      this.skipWS();
 
-  return root;
+      const ch = this.peek();
+      if (ch === "}") {
+        this.advance();
+        return obj;
+      }
+      if (ch === ",") {
+        this.advance();
+        this.skipWS();
+        if (this.peek() === "}") this.err("Trailing comma in object");
+      } else {
+        this.err(`Expected ',' or '}' but got '${ch || "EOF"}'`);
+      }
+    }
+  }
+}
+
+/**
+ * Parse a JSON string into a JavaScript value.
+ *
+ * Throws `JsonParseError` on invalid input, with `.line`, `.column`, and
+ * `.offset` indicating where in the input the error occurred.
+ */
+export function parse(input: string, options: ParseOptions = {}): unknown {
+  if (typeof input !== "string") {
+    throw new TypeError("json.parse: input must be a string");
+  }
+  return new Parser(input, options).parse();
 }
 
 // ─── Self-tests ───────────────────────────────────────────────────────────────
 
-function runTests(): void {
+type TestFn = () => void;
+
+function runSuite(title: string, tests: Record<string, TestFn>): { passed: number; failed: number } {
+  console.log(`\n${title}`);
   let passed = 0;
   let failed = 0;
-
-  function assert(description: string, condition: boolean): void {
-    if (condition) {
-      console.log(`  ✓ ${description}`);
-      passed++;
-    } else {
-      console.error(`  ✗ FAIL: ${description}`);
-      failed++;
-    }
-  }
-
-  function assertThrows(
-    description: string,
-    fn: () => unknown,
-    check?: (e: unknown) => boolean,
-  ): void {
+  for (const [name, fn] of Object.entries(tests)) {
     try {
       fn();
-      console.error(`  ✗ FAIL (no throw): ${description}`);
-      failed++;
+      console.log(`  ✓ ${name}`);
+      passed++;
     } catch (e) {
-      if (check && !check(e)) {
-        console.error(
-          `  ✗ FAIL (wrong error): ${description} → ${String(e)}`,
-        );
-        failed++;
-      } else {
-        console.log(`  ✓ ${description}`);
-        passed++;
-      }
+      console.error(`  ✗ ${name}`);
+      console.error(`    ${(e as Error).message}`);
+      failed++;
     }
   }
+  return { passed, failed };
+}
 
-  function eq(a: unknown, b: unknown): boolean {
-    return JSON.stringify(a) === JSON.stringify(b);
+function eq(a: unknown, b: unknown, label: string): void {
+  const as = JSON.stringify(a);
+  const bs = JSON.stringify(b);
+  if (as !== bs) throw new Error(`${label}\n    expected: ${bs}\n    got:      ${as}`);
+}
+
+function throws(fn: () => unknown, check?: (e: Error) => boolean, label?: string): void {
+  try {
+    fn();
+  } catch (e) {
+    if (check && !check(e as Error)) {
+      throw new Error(`${label ?? "throws"}: error did not match predicate — ${(e as Error).message}`);
+    }
+    return;
+  }
+  throw new Error(`${label ?? "throws"}: expected an error but none was thrown`);
+}
+
+export function runTests(): void {
+  let totalPassed = 0;
+  let totalFailed = 0;
+
+  function suite(title: string, tests: Record<string, TestFn>): void {
+    const { passed, failed } = runSuite(title, tests);
+    totalPassed += passed;
+    totalFailed += failed;
   }
 
-  // ── Stringify: primitives ──
-  console.log("\nstringify — primitives");
-  assert("null",             stringify(null) === "null");
-  assert("true",             stringify(true) === "true");
-  assert("false",            stringify(false) === "false");
-  assert("integer",          stringify(42) === "42");
-  assert("float",            stringify(3.14) === "3.14");
-  assert("negative",         stringify(-7) === "-7");
-  assert("zero",             stringify(0) === "0");
-  assert("-0 → 0",           stringify(-0) === "0");
-  assert("NaN → null",       stringify(NaN) === "null");
-  assert("Infinity → null",  stringify(Infinity) === "null");
-  assert("-Infinity → null", stringify(-Infinity) === "null");
-  assert("string",           stringify("hello") === '"hello"');
-  assert("empty string",     stringify("") === '""');
-  assert("undefined → undef",stringify(undefined) === undefined);
+  // ── stringify: primitives ────────────────────────────────────────────────
+  suite("stringify / primitives", {
+    "null": () => eq(stringify(null), "null", "null"),
+    "true": () => eq(stringify(true), "true", "bool"),
+    "false": () => eq(stringify(false), "false", "bool"),
+    "integer": () => eq(stringify(42), "42", "int"),
+    "float": () => eq(stringify(3.14), "3.14", "float"),
+    "NaN → null": () => eq(stringify(NaN), "null", "NaN"),
+    "Infinity → null": () => eq(stringify(Infinity), "null", "Inf"),
+    "-Infinity → null": () => eq(stringify(-Infinity), "null", "-Inf"),
+    "string basic": () => eq(stringify("hello"), '"hello"', "str"),
+    "string escapes": () => eq(stringify('a\nb\tc"d\\e'), '"a\\nb\\tc\\"d\\\\e"', "escapes"),
+    "string control chars": () => eq(stringify("\x01\x1f"), '"\\u0001\\u001f"', "ctrl"),
+    "undefined → undefined": () => eq(stringify(undefined), undefined, "undef"),
+    "function → undefined": () => eq(stringify(() => 0), undefined, "fn"),
+    "bigint → quoted string": () => eq(stringify(BigInt("99999999999999999999")), '"99999999999999999999"', "bigint"),
+  });
 
-  // ── Stringify: string escaping ──
-  console.log("\nstringify — string escaping");
-  assert("quote",        stringify('"') === '"\\""');
-  assert("backslash",    stringify("\\") === '"\\\\"');
-  assert("tab",          stringify("\t") === '"\\t"');
-  assert("newline",      stringify("\n") === '"\\n"');
-  assert("cr",           stringify("\r") === '"\\r"');
-  assert("backspace",    stringify("\b") === '"\\b"');
-  assert("formfeed",     stringify("\f") === '"\\f"');
-  assert("control U+001F", stringify("\x1f") === '"\\u001f"');
-  assert("unicode passthrough", stringify("∑") === '"∑"');
-
-  // ── Stringify: objects & arrays ──
-  console.log("\nstringify — objects & arrays");
-  assert("empty array",  stringify([]) === "[]");
-  assert("empty object", stringify({}) === "{}");
-  assert("array",        stringify([1, 2, 3]) === "[1,2,3]");
-  assert("object",       stringify({ a: 1, b: 2 }) === '{"a":1,"b":2}');
-  assert("nested",
-    stringify({ x: [1, { y: true }] }) === '{"x":[1,{"y":true}]}');
-  assert("undefined in object dropped",
-    stringify({ a: 1, b: undefined }) === '{"a":1}');
-  assert("function in object dropped",
-    stringify({ a: 1, b: () => 0 }) === '{"a":1}');
-  assert("undefined in array → null",
-    stringify([1, undefined, 3]) === "[1,null,3]");
-
-  // ── Stringify: indentation ──
-  console.log("\nstringify — indentation");
-  const indented = stringify({ a: [1, 2] }, { space: 2 });
-  assert("2-space indent contains newline", (indented ?? "").includes("\n"));
-  assert("2-space indent correct",
-    indented === '{\n  "a": [\n    1,\n    2\n  ]\n}');
-  assert("string space",
-    stringify({ x: 1 }, { space: "\t" }) === '{\n\t"x": 1\n}');
-  assert("space capped at 10",
-    // 20 spaces → still 10
-    (stringify({ x: 1 }, { space: 20 }) ?? "").includes("          ") &&
-    !(stringify({ x: 1 }, { space: 20 }) ?? "").includes("           "));
-
-  // ── Stringify: replacer function ──
-  console.log("\nstringify — replacer function");
-  const rfResult = stringify(
-    { a: 1, b: 2, c: 3 },
-    { replacer: (k, v) => (k === "b" ? undefined : v) },
-  );
-  assert("replacer fn drops key b", rfResult === '{"a":1,"c":3}');
-
-  const rfDouble = stringify(
-    { n: 5 },
-    { replacer: (k, v) => (typeof v === "number" ? v * 2 : v) },
-  );
-  assert("replacer fn transforms numbers", rfDouble === '{"n":10}');
-
-  // ── Stringify: replacer array ──
-  console.log("\nstringify — replacer array");
-  const raResult = stringify({ a: 1, b: 2, c: 3 }, { replacer: ["a", "c"] });
-  assert("replacer array keeps only listed keys", raResult === '{"a":1,"c":3}');
-
-  // ── Stringify: cycle detection ──
-  console.log("\nstringify — cycle detection");
-  const cyc: Record<string, unknown> = { x: 1 };
-  cyc["self"] = cyc;
-  assertThrows(
-    "circular reference throws TypeError",
-    () => stringify(cyc),
-    e => e instanceof TypeError && (e as TypeError).message.includes("Circular"),
-  );
-
-  const cycArr: unknown[] = [1, 2];
-  cycArr.push(cycArr);
-  assertThrows(
-    "circular array throws TypeError",
-    () => stringify(cycArr),
-    e => e instanceof TypeError,
-  );
-
-  // ── Stringify: bigint ──
-  console.log("\nstringify — bigint");
-  assertThrows(
-    "bigint throws without option",
-    () => stringify(BigInt(9999)),
-    e => e instanceof TypeError,
-  );
-  assert(
-    "bigint serialized as string with option",
-    stringify(BigInt("12345678901234567890"), { bigintAsString: true }) ===
-      '"12345678901234567890"',
-  );
-
-  // ── Stringify: toJSON ──
-  console.log("\nstringify — toJSON");
-  const withToJSON = {
-    a: 1,
-    toJSON() { return { b: 2 }; },
-  };
-  assert("toJSON called", stringify(withToJSON) === '{"b":2}');
-
-  // ── Parse: primitives ──
-  console.log("\nparse — primitives");
-  assert("null",   parse("null") === null);
-  assert("true",   parse("true") === true);
-  assert("false",  parse("false") === false);
-  assert("integer", parse("42") === 42);
-  assert("float",   parse("3.14") === 3.14);
-  assert("negative", parse("-7") === -7);
-  assert("zero",    parse("0") === 0);
-  assert("string",  parse('"hello"') === "hello");
-  assert("empty string", parse('""') === "");
-  assert("whitespace padded", parse("  42  ") === 42);
-
-  // ── Parse: numbers ──
-  console.log("\nparse — numbers");
-  assert("exponent", parse("1e3") === 1000);
-  assert("neg exponent", parse("1.5e-2") === 0.015);
-  assert("capital E", parse("2E5") === 200000);
-  assert("positive exponent sign", parse("2e+3") === 2000);
-
-  // ── Parse: strings ──
-  console.log("\nparse — strings");
-  assert("escape quote",    parse('"\\""') === '"');
-  assert("escape backslash",parse('"\\\\')  + '"' === '"\\\\',
-    parse('"\\\\"') === "\\");
-  assert("escape tab",      parse('"\\t"') === "\t");
-  assert("escape newline",  parse('"\\n"') === "\n");
-  assert("escape unicode",  parse('"\\u0041"') === "A");
-  assert("escape surrogate pair", parse('"\\uD83D\\uDE00"') === "😀");
-  assert("solidus escape",  parse('"a\\/b"') === "a/b");
-
-  // ── Parse: arrays & objects ──
-  console.log("\nparse — arrays & objects");
-  assert("empty array",  eq(parse("[]"), []));
-  assert("empty object", eq(parse("{}"), {}));
-  assert("array",        eq(parse("[1,2,3]"), [1, 2, 3]));
-  assert("object",       eq(parse('{"a":1,"b":true}'), { a: 1, b: true }));
-  assert("nested",
-    eq(parse('{"x":[1,{"y":false}]}'), { x: [1, { y: false }] }));
-  assert("whitespace in object",
-    eq(parse('{ "a" : 1 , "b" : 2 }'), { a: 1, b: 2 }));
-
-  // ── Parse: errors with position tracking ──
-  console.log("\nparse — position-tracked errors");
-
-  assertThrows(
-    "trailing garbage reports position",
-    () => parse('42 garbage'),
-    e => e instanceof JsonParseError && (e as JsonParseError).position === 3,
-  );
-
-  assertThrows(
-    "unterminated string",
-    () => parse('"hello'),
-    e => e instanceof JsonParseError,
-  );
-
-  assertThrows(
-    "invalid escape",
-    () => parse('"\\q"'),
-    e => e instanceof JsonParseError &&
-      (e as JsonParseError).message.includes("Invalid escape"),
-  );
-
-  assertThrows(
-    "missing colon",
-    () => parse('{"a" 1}'),
-    e => e instanceof JsonParseError,
-  );
-
-  assertThrows(
-    "trailing comma in object",
-    () => parse('{"a":1,}'),
-    e => e instanceof JsonParseError,
-  );
-
-  assertThrows(
-    "trailing comma in array",
-    () => parse('[1,2,]'),
-    e => e instanceof JsonParseError,
-  );
-
-  assertThrows(
-    "bare identifier",
-    () => parse('undefined'),
-    e => e instanceof JsonParseError,
-  );
-
-  assertThrows(
-    "line/column on multi-line error",
-    () => parse('{\n  "a": !invalid\n}'),
-    e => {
-      const err = e as JsonParseError;
-      return (
-        err instanceof JsonParseError &&
-        err.line === 2 &&
-        err.column === 7
-      );
+  // ── stringify: arrays & objects ──────────────────────────────────────────
+  suite("stringify / arrays & objects", {
+    "empty array": () => eq(stringify([]), "[]", "[]"),
+    "empty object": () => eq(stringify({}), "{}", "{}"),
+    "array": () => eq(stringify([1, "x", null, true]), '[1,"x",null,true]', "arr"),
+    "undefined in array → null": () => eq(stringify([1, undefined, 3]), "[1,null,3]", "arr-undef"),
+    "nested": () => eq(stringify({ a: [1, 2], b: { c: 3 } }), '{"a":[1,2],"b":{"c":3}}', "nested"),
+    "toJSON called": () => {
+      const obj = { x: 1, toJSON: () => ({ x: 99 }) };
+      eq(stringify(obj), '{"x":99}', "toJSON");
     },
-  );
-
-  // ── Parse: big-number-as-string ──
-  console.log("\nparse — bigNumberAsString");
-  const bigInt = "99999999999999999999";
-  assert(
-    "big integer returned as string",
-    parse(bigInt, { bigNumberAsString: true }) === bigInt,
-  );
-  assert(
-    "normal integer still a number",
-    parse("42", { bigNumberAsString: true }) === 42,
-  );
-  assert(
-    "MAX_SAFE_INTEGER still a number",
-    parse(String(Number.MAX_SAFE_INTEGER), { bigNumberAsString: true }) ===
-      Number.MAX_SAFE_INTEGER,
-  );
-  assert(
-    "float not affected by bigNumberAsString",
-    parse("1.23456789012345678", { bigNumberAsString: true }) ===
-      1.23456789012345678,
-  );
-
-  // ── Parse: reviver ──
-  console.log("\nparse — reviver");
-  const dateRevived = parse(
-    '{"created":"2024-01-15"}',
-    {
-      reviver: (k, v) =>
-        k === "created" && typeof v === "string" ? new Date(v) : v,
-    },
-  ) as { created: Date };
-  assert(
-    "reviver converts string to Date",
-    dateRevived.created instanceof Date,
-  );
-
-  const dropB = parse('{"a":1,"b":2,"c":3}', {
-    reviver: (k, v) => k === "b" ? undefined : v,
-  }) as Record<string, unknown>;
-  assert("reviver returning undefined drops key",
-    !("b" in dropB) && dropB["a"] === 1 && dropB["c"] === 3);
-
-  const sumArrayReviver = parse('[1,2,3]', {
-    reviver: (k, v) => {
-      if (k === "") {
-        // root — v is the final array
-        return (v as number[]).reduce((a, b) => a + b, 0);
-      }
-      return v;
+    "undefined property omitted": () => {
+      eq(stringify({ a: 1, b: undefined, c: 3 }), '{"a":1,"c":3}', "undef-prop");
     },
   });
-  assert("reviver on root replaces value", sumArrayReviver === 6);
 
-  // ── Round-trip ──
-  console.log("\nround-trip");
-  const complex = {
-    name: "test",
-    nums: [1, -2, 3.14, 0],
-    nested: { flag: true, nil: null },
-    special: "tab:\there",
-    empty: {},
-    arr: [],
-  };
-  assert(
-    "complex object round-trips",
-    eq(parse(stringify(complex) ?? ""), complex),
-  );
+  // ── stringify: indentation ───────────────────────────────────────────────
+  suite("stringify / indentation", {
+    "numeric space": () => {
+      const r = stringify({ a: 1 }, { space: 2 });
+      eq(r, '{\n  "a": 1\n}', "indent-2");
+    },
+    "string space": () => {
+      const r = stringify([1, 2], { space: "\t" });
+      eq(r, '[\n\t1,\n\t2\n]', "tab");
+    },
+    "space clamped to 10": () => {
+      const r = stringify({ a: 1 }, { space: 100 });
+      // 10 spaces
+      eq(r, '{\n' + " ".repeat(10) + '"a": 1\n}', "clamp-10");
+    },
+  });
 
-  const withUnicode = { emoji: "😀", snowman: "☃", math: "∫∑∞" };
-  assert(
-    "unicode round-trips",
-    eq(parse(stringify(withUnicode) ?? ""), withUnicode),
-  );
+  // ── stringify: replacer ──────────────────────────────────────────────────
+  suite("stringify / replacer", {
+    "function replacer": () => {
+      const r = stringify({ a: 1, b: 2 }, {
+        replacer: (k, v) => (k === "b" ? undefined : v),
+      });
+      eq(r, '{"a":1}', "fn-repl");
+    },
+    "array replacer": () => {
+      const r = stringify({ a: 1, b: 2, c: 3 }, { replacer: ["a", "c"] });
+      eq(r, '{"a":1,"c":3}', "arr-repl");
+    },
+    "replacer transforms values": () => {
+      const r = stringify({ n: 5 }, {
+        replacer: (k, v) => (typeof v === "number" ? v * 2 : v),
+      });
+      eq(r, '{"n":10}', "xform");
+    },
+  });
 
-  // ── Summary ──
-  console.log(
-    `\n${"─".repeat(40)}\n  ${passed} passed, ${failed} failed\n`,
-  );
+  // ── stringify: cycle detection ───────────────────────────────────────────
+  suite("stringify / cycle detection", {
+    "throws on cycle (default)": () => {
+      const a: Record<string, unknown> = { x: 1 };
+      a["self"] = a;
+      throws(() => stringify(a), (e) => e instanceof CircularReferenceError, "cycle-throw");
+    },
+    "null on cycle": () => {
+      const a: Record<string, unknown> = { x: 1 };
+      a["self"] = a;
+      const r = stringify(a, { cyclicRef: "null" });
+      eq(r, '{"x":1,"self":null}', "cycle-null");
+    },
+    "nested cycle": () => {
+      const a: Record<string, unknown> = {};
+      const b: Record<string, unknown> = { parent: a };
+      a["child"] = b;
+      throws(() => stringify(a), (e) => e instanceof CircularReferenceError, "nested-cycle");
+    },
+  });
 
-  if (failed > 0) {
-    process.exitCode = 1;
+  // ── parse: primitives ────────────────────────────────────────────────────
+  suite("parse / primitives", {
+    "null": () => eq(parse("null"), null, "null"),
+    "true": () => eq(parse("true"), true, "true"),
+    "false": () => eq(parse("false"), false, "false"),
+    "integer": () => eq(parse("42"), 42, "int"),
+    "negative": () => eq(parse("-7"), -7, "neg"),
+    "float": () => eq(parse("3.14"), 3.14, "float"),
+    "exponent": () => eq(parse("1e3"), 1000, "exp"),
+    "exponent negative": () => eq(parse("2.5e-2"), 0.025, "exp-neg"),
+    "string": () => eq(parse('"hello"'), "hello", "str"),
+    "string escapes": () => eq(parse('"\\n\\t\\r"'), "\n\t\r", "escapes"),
+    "string unicode": () => eq(parse('"\\u0041"'), "A", "unicode"),
+    "surrogate pair": () => eq(parse('"\\uD83D\\uDE00"'), "😀", "surrogate"),
+  });
+
+  // ── parse: arrays & objects ──────────────────────────────────────────────
+  suite("parse / arrays & objects", {
+    "empty array": () => eq(parse("[]"), [], "[]"),
+    "empty object": () => eq(parse("{}"), {}, "{}"),
+    "array": () => eq(parse('[1,"x",null,true]'), [1, "x", null, true], "arr"),
+    "nested": () => eq(parse('{"a":[1,2],"b":{"c":3}}'), { a: [1, 2], b: { c: 3 } }, "nested"),
+    "whitespace tolerant": () => eq(parse(' { "x" : 1 } '), { x: 1 }, "ws"),
+  });
+
+  // ── parse: position-tracked errors ──────────────────────────────────────
+  suite("parse / position-tracked errors", {
+    "reports offset": () => {
+      try {
+        parse("{ bad }");
+        throw new Error("should have thrown");
+      } catch (e) {
+        if (!(e instanceof JsonParseError)) throw new Error("wrong error type");
+        if (e.offset !== 2) throw new Error(`expected offset 2, got ${e.offset}`);
+      }
+    },
+    "reports line and column": () => {
+      try {
+        parse('{\n  "a": bad\n}');
+        throw new Error("should have thrown");
+      } catch (e) {
+        if (!(e instanceof JsonParseError)) throw new Error("wrong error type");
+        if (e.line !== 2) throw new Error(`expected line 2, got ${e.line}`);
+        if (e.column !== 7) throw new Error(`expected col 7, got ${e.column}`);
+      }
+    },
+    "trailing comma in array": () => {
+      throws(() => parse("[1,2,]"), (e) => e instanceof JsonParseError && /trailing/i.test(e.message), "trail-arr");
+    },
+    "trailing comma in object": () => {
+      throws(() => parse('{"a":1,}'), (e) => e instanceof JsonParseError && /trailing/i.test(e.message), "trail-obj");
+    },
+    "unexpected token": () => {
+      throws(() => parse("@"), (e) => e instanceof JsonParseError, "tok");
+    },
+    "unterminated string": () => {
+      throws(() => parse('"hello'), (e) => e instanceof JsonParseError, "unterm");
+    },
+    "invalid escape": () => {
+      throws(() => parse('"\\q"'), (e) => e instanceof JsonParseError, "esc");
+    },
+    "unescaped control char": () => {
+      throws(() => parse('"\x00"'), (e) => e instanceof JsonParseError, "ctrl");
+    },
+    "trailing content": () => {
+      throws(() => parse("1 2"), (e) => e instanceof JsonParseError, "trail");
+    },
+    "empty input": () => {
+      throws(() => parse(""), (e) => e instanceof JsonParseError, "empty");
+    },
+  });
+
+  // ── parse: big-number handling ───────────────────────────────────────────
+  suite("parse / bigNumberAsString", {
+    "safe integer stays number": () => {
+      const v = parse("9007199254740991", { bigNumberAsString: true });
+      eq(typeof v, "number", "type");
+      eq(v, 9007199254740991, "val");
+    },
+    "unsafe integer → string": () => {
+      const v = parse("99999999999999999999", { bigNumberAsString: true });
+      eq(v, "99999999999999999999", "big-int");
+    },
+    "unsafe negative → string": () => {
+      const v = parse("-99999999999999999999", { bigNumberAsString: true });
+      eq(v, "-99999999999999999999", "big-neg");
+    },
+    "float not affected": () => {
+      const v = parse("1.5e20", { bigNumberAsString: true });
+      eq(typeof v, "number", "float-type");
+    },
+    "big number off by default": () => {
+      const v = parse("99999999999999999999");
+      eq(typeof v, "number", "default-off");
+    },
+  });
+
+  // ── round-trip ───────────────────────────────────────────────────────────
+  suite("round-trip", {
+    "primitives": () => {
+      for (const v of [null, true, false, 0, 1, -1, 3.14, "", "hello", "a\nb"]) {
+        const rt = parse(stringify(v) as string);
+        eq(rt, v, `round-trip ${JSON.stringify(v)}`);
+      }
+    },
+    "complex object": () => {
+      const obj = { a: [1, 2, null], b: { c: "hi\nthere", d: false }, e: 0 };
+      eq(parse(stringify(obj) as string), obj, "complex");
+    },
+    "indented parse": () => {
+      const obj = { x: [1, 2, 3] };
+      eq(parse(stringify(obj, { space: 2 }) as string), obj, "indented");
+    },
+  });
+
+  // ── summary ──────────────────────────────────────────────────────────────
+  console.log(`\n${"─".repeat(44)}`);
+  console.log(`  ${totalPassed} passed, ${totalFailed} failed`);
+  if (totalFailed > 0) {
+    process.exit(1);
   }
 }
 
-// Run when executed directly: `npx ts-node json.ts` or `deno run json.ts`
-// In Deno, import.meta.main is true; in Node with ts-node, require.main check
-// is unreliable, so we check a common pattern.
-if (
+// Run when invoked directly: ts-node json.ts  or  node json.js
+const isMain =
   typeof process !== "undefined" &&
-  // ts-node sets argv[1] to the script path
-  (process.argv[1]?.endsWith("json.ts") ||
-   process.argv[1]?.endsWith("json.js"))
-) {
+  typeof require !== "undefined" &&
+  require.main === module;
+
+if (isMain) {
   runTests();
 }
-
-export { runTests };

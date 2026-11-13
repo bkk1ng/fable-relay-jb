@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-tiny shell — interactive command REPL with readline history, tab completion,
-and a small set of built-in commands. Config loaded from
-~/.config/tiny/config.json with sane defaults.
+tiny shell — interactive REPL with readline, history, tab completion,
+and a small set of built-in commands. Config from ~/.config/tiny/config.json.
 """
 
 import json
 import os
 import readline
 import shutil
-import stat
 import sys
 from pathlib import Path
 
@@ -18,12 +16,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 CONFIG_PATH = Path.home() / ".config" / "tiny" / "config.json"
+HISTORY_PATH = Path.home() / ".tiny_history"
 
 DEFAULTS: dict = {
     "prompt": "tiny> ",
-    "history_file": str(Path.home() / ".tiny_history"),
-    "history_size": 1000,
+    "history_length": 1000,
     "ls_show_hidden": False,
+    "cat_max_bytes": 1_048_576,  # 1 MiB
 }
 
 
@@ -31,98 +30,74 @@ def load_config() -> dict:
     cfg = dict(DEFAULTS)
     if CONFIG_PATH.exists():
         try:
-            with CONFIG_PATH.open() as fh:
-                user = json.load(fh)
+            with CONFIG_PATH.open() as f:
+                user = json.load(f)
             if isinstance(user, dict):
                 cfg.update(user)
         except (json.JSONDecodeError, OSError) as exc:
-            print(f"[tiny] warning: could not read config: {exc}", file=sys.stderr)
+            print(f"[warn] could not read config: {exc}", file=sys.stderr)
     return cfg
 
 
 # ---------------------------------------------------------------------------
-# Readline history + completion
+# Tab completion
 # ---------------------------------------------------------------------------
 
 COMMANDS = ["cd", "ls", "cat", "mkdir", "rm", "exit", "help"]
 
 
-def _path_completions(prefix: str) -> list[str]:
-    """Return filesystem entries that start with *prefix*."""
-    if not prefix:
-        base_dir, partial = ".", ""
-    elif prefix.endswith(os.sep):
-        base_dir, partial = prefix, ""
+def _path_completions(text: str) -> list[str]:
+    """Return filesystem completions for a partial path."""
+    if not text:
+        entries = list(Path(".").iterdir())
     else:
-        base_dir = os.path.dirname(prefix) or "."
-        partial = os.path.basename(prefix)
-
-    try:
-        entries = os.listdir(base_dir)
-    except OSError:
-        return []
-
-    matches = []
-    for entry in entries:
-        if entry.startswith(partial):
-            full = os.path.join(base_dir, entry) if base_dir != "." else entry
-            if prefix.startswith("./") or "/" in prefix:
-                full = os.path.join(base_dir, entry)
-            if os.path.isdir(full):
-                matches.append(full + os.sep)
-            else:
-                matches.append(full)
-    return matches
-
-
-def make_completer():
-    """Return a readline-compatible completer function."""
-    def completer(text: str, state: int) -> str | None:
-        # Build the full line to decide context.
-        line = readline.get_line_buffer()
-        tokens = line.split()
-
-        # First token → complete command names.
-        if not tokens or (len(tokens) == 1 and not line.endswith(" ")):
-            matches = [c for c in COMMANDS if c.startswith(text)]
-        else:
-            # Subsequent tokens → complete paths.
-            matches = _path_completions(text)
-
-        return matches[state] if state < len(matches) else None
-
-    return completer
-
-
-def setup_readline(history_file: str, history_size: int) -> None:
-    readline.set_completer(make_completer())
-    readline.set_completer_delims(" \t\n;")
-    readline.parse_and_bind("tab: complete")
-
-    hpath = Path(history_file)
-    hpath.parent.mkdir(parents=True, exist_ok=True)
-    if hpath.exists():
+        p = Path(text)
+        parent = p.parent if p.parent != Path("") else Path(".")
         try:
-            readline.read_history_file(str(hpath))
-        except OSError:
-            pass
+            entries = [
+                child
+                for child in parent.iterdir()
+                if child.name.startswith(p.name)
+            ]
+        except (OSError, PermissionError):
+            return []
 
-    readline.set_history_length(history_size)
+    completions = []
+    for entry in entries:
+        # Reconstruct relative to the original partial text
+        base = str(Path(text).parent) if "/" in text else ""
+        name = str(entry) if not base else str(entry)
+        suffix = "/" if entry.is_dir() else ""
+        completions.append(name + suffix)
+    return completions
 
 
-def save_history(history_file: str) -> None:
-    try:
-        readline.write_history_file(history_file)
-    except OSError as exc:
-        print(f"[tiny] warning: could not save history: {exc}", file=sys.stderr)
+class ShellCompleter:
+    def __init__(self) -> None:
+        self._matches: list[str] = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        if state == 0:
+            # Decide what we are completing
+            buf = readline.get_line_buffer().lstrip()
+            tokens = buf.split()
+
+            if not tokens or (len(tokens) == 1 and not buf.endswith(" ")):
+                # Completing the command name itself
+                self._matches = [c for c in COMMANDS if c.startswith(text)]
+            else:
+                # Completing a path argument
+                self._matches = _path_completions(text)
+
+        return self._matches[state] if state < len(self._matches) else None
 
 
 # ---------------------------------------------------------------------------
-# Built-in command implementations
+# Commands
 # ---------------------------------------------------------------------------
 
-def cmd_cd(args: list[str]) -> None:
-    target = args[0] if args else str(Path.home())
+def cmd_cd(args: list[str], _cfg: dict) -> None:
+    target = Path(args[0]).expanduser() if args else Path.home()
     try:
         os.chdir(target)
     except FileNotFoundError:
@@ -133,196 +108,172 @@ def cmd_cd(args: list[str]) -> None:
         print(f"cd: {target}: permission denied")
 
 
-def _format_mode(mode: int) -> str:
-    """Return a 10-character permission string like drwxr-xr-x."""
-    kinds = {
-        stat.S_IFDIR:  "d",
-        stat.S_IFLNK:  "l",
-        stat.S_IFREG:  "-",
-        stat.S_IFIFO:  "p",
-        stat.S_IFSOCK: "s",
-        stat.S_IFBLK:  "b",
-        stat.S_IFCHR:  "c",
-    }
-    file_type = kinds.get(stat.S_IFMT(mode), "?")
-    bits = ""
-    for shift in (6, 3, 0):
-        bits += "r" if mode >> shift & 0o4 else "-"
-        bits += "w" if mode >> shift & 0o2 else "-"
-        bits += "x" if mode >> shift & 0o1 else "-"
-    return file_type + bits
-
-
-def cmd_ls(args: list[str], show_hidden: bool) -> None:
-    path = args[0] if args else "."
+def cmd_ls(args: list[str], cfg: dict) -> None:
+    target = Path(args[0]).expanduser() if args else Path(".")
     try:
-        entries = sorted(os.listdir(path))
+        entries = sorted(target.iterdir(), key=lambda p: p.name.lower())
     except FileNotFoundError:
-        print(f"ls: {path}: no such file or directory")
+        print(f"ls: {target}: no such file or directory")
         return
     except NotADirectoryError:
-        print(f"ls: {path}: not a directory")
+        # target is a file — just show it
+        print(target.name)
         return
     except PermissionError:
-        print(f"ls: {path}: permission denied")
+        print(f"ls: {target}: permission denied")
         return
 
-    for name in entries:
-        if not show_hidden and name.startswith("."):
+    show_hidden: bool = cfg.get("ls_show_hidden", False)
+    for entry in entries:
+        if not show_hidden and entry.name.startswith("."):
             continue
-        full = os.path.join(path, name)
-        try:
-            st = os.lstat(full)
-            size = st.st_size
-            mode_str = _format_mode(st.st_mode)
-        except OSError:
-            mode_str = "??????????"
-            size = 0
-        display = name + ("/" if os.path.isdir(full) else "")
-        print(f"{mode_str}  {size:>10}  {display}")
+        suffix = "/" if entry.is_dir() else ""
+        print(entry.name + suffix)
 
 
-def cmd_cat(args: list[str]) -> None:
+def cmd_cat(args: list[str], cfg: dict) -> None:
     if not args:
-        print("cat: missing file operand")
+        print("cat: missing filename")
         return
-    for filepath in args:
+    max_bytes: int = cfg.get("cat_max_bytes", DEFAULTS["cat_max_bytes"])
+    for name in args:
+        path = Path(name).expanduser()
         try:
-            with open(filepath, "r", errors="replace") as fh:
-                sys.stdout.write(fh.read())
+            size = path.stat().st_size
+            if size > max_bytes:
+                print(
+                    f"cat: {path}: file too large "
+                    f"({size} bytes, limit {max_bytes})"
+                )
+                continue
+            print(path.read_text(errors="replace"), end="")
         except FileNotFoundError:
-            print(f"cat: {filepath}: no such file or directory")
+            print(f"cat: {path}: no such file or directory")
         except IsADirectoryError:
-            print(f"cat: {filepath}: is a directory")
+            print(f"cat: {path}: is a directory")
         except PermissionError:
-            print(f"cat: {filepath}: permission denied")
-    # Ensure the prompt starts on a new line if the file had no trailing newline.
-    if sys.stdout.tell() if hasattr(sys.stdout, "tell") else True:
-        pass  # let the REPL print its own newline via input()
+            print(f"cat: {path}: permission denied")
 
 
-def cmd_mkdir(args: list[str]) -> None:
+def cmd_mkdir(args: list[str], _cfg: dict) -> None:
     if not args:
-        print("mkdir: missing operand")
+        print("mkdir: missing directory name")
         return
-    for dirpath in args:
+    for name in args:
+        path = Path(name).expanduser()
         try:
-            Path(dirpath).mkdir(parents=True, exist_ok=False)
-            print(f"mkdir: created '{dirpath}'")
+            path.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
-            print(f"mkdir: {dirpath}: already exists")
+            print(f"mkdir: {path}: already exists")
         except PermissionError:
-            print(f"mkdir: {dirpath}: permission denied")
-        except OSError as exc:
-            print(f"mkdir: {dirpath}: {exc}")
+            print(f"mkdir: {path}: permission denied")
 
 
-def cmd_rm(args: list[str]) -> None:
+def cmd_rm(args: list[str], _cfg: dict) -> None:
     if not args:
-        print("rm: missing operand")
+        print("rm: missing path")
         return
-    for target in args:
-        p = Path(target)
-        if not p.exists() and not p.is_symlink():
-            print(f"rm: {target}: no such file or directory")
-            continue
-        is_dir = p.is_dir() and not p.is_symlink()
-        kind = "directory" if is_dir else "file"
+    for name in args:
+        path = Path(name).expanduser()
         try:
-            answer = input(f"rm: remove {kind} '{target}'? [y/N] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            continue
-        if answer in ("y", "yes"):
-            try:
-                if is_dir:
-                    shutil.rmtree(target)
-                else:
-                    p.unlink()
-                print(f"rm: removed '{target}'")
-            except PermissionError:
-                print(f"rm: {target}: permission denied")
-            except OSError as exc:
-                print(f"rm: {target}: {exc}")
-        else:
-            print(f"rm: '{target}' not removed")
+            is_dir = path.is_dir() and not path.is_symlink()
+            kind = "directory" if is_dir else "file"
+            answer = input(f"rm: remove {kind} '{path}'? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print(f"rm: skipped '{path}'")
+                continue
+            if is_dir:
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            print(f"rm: {path}: no such file or directory")
+        except PermissionError:
+            print(f"rm: {path}: permission denied")
+        except KeyboardInterrupt:
+            print()  # newline after ^C during prompt
+            print(f"rm: skipped '{path}'")
 
 
-def cmd_help() -> None:
+def cmd_help(_args: list[str], _cfg: dict) -> None:
     print(
-        "built-in commands:\n"
-        "  cd [dir]        change directory (default: home)\n"
-        "  ls [dir]        list directory contents\n"
-        "  cat <file>...   print file contents\n"
-        "  mkdir <dir>...  create directories\n"
-        "  rm <path>...    remove files or directories (with confirmation)\n"
-        "  help            show this message\n"
-        "  exit            quit (also Ctrl-D)\n"
+        "commands: cd [dir]  ls [dir]  cat <file>…  mkdir <dir>…  "
+        "rm <path>…  exit  help"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch table
+# ---------------------------------------------------------------------------
+
+DISPATCH = {
+    "cd": cmd_cd,
+    "ls": cmd_ls,
+    "cat": cmd_cat,
+    "mkdir": cmd_mkdir,
+    "rm": cmd_rm,
+    "help": cmd_help,
+}
+
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+def setup_history(cfg: dict) -> None:
+    readline.set_history_length(cfg.get("history_length", DEFAULTS["history_length"]))
+    if HISTORY_PATH.exists():
+        try:
+            readline.read_history_file(str(HISTORY_PATH))
+        except OSError:
+            pass
+
+
+def save_history() -> None:
+    try:
+        readline.write_history_file(str(HISTORY_PATH))
+    except OSError as exc:
+        print(f"[warn] could not save history: {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
 # REPL
 # ---------------------------------------------------------------------------
 
-def dispatch(line: str, cfg: dict) -> bool:
-    """Parse *line* and run the matching command. Return False to exit."""
-    tokens = line.split()
-    if not tokens:
-        return True
-
-    cmd, *args = tokens
-
-    if cmd == "exit":
-        return False
-    elif cmd == "cd":
-        cmd_cd(args)
-    elif cmd == "ls":
-        cmd_ls(args, show_hidden=cfg.get("ls_show_hidden", False))
-    elif cmd == "cat":
-        cmd_cat(args)
-    elif cmd == "mkdir":
-        cmd_mkdir(args)
-    elif cmd == "rm":
-        cmd_rm(args)
-    elif cmd == "help":
-        cmd_help()
-    else:
-        print(f"tiny: {cmd}: command not found (try 'help')")
-
-    return True
-
-
 def repl(cfg: dict) -> None:
-    prompt = cfg.get("prompt", DEFAULTS["prompt"])
-    history_file = cfg.get("history_file", DEFAULTS["history_file"])
+    prompt: str = cfg.get("prompt", DEFAULTS["prompt"])
 
     while True:
         try:
             line = input(prompt)
-        except KeyboardInterrupt:
-            # Ctrl-C: cancel current line, keep running.
-            print()
-            continue
         except EOFError:
-            # Ctrl-D: clean exit.
+            # Ctrl-D — clean exit
             print()
             break
+        except KeyboardInterrupt:
+            # Ctrl-C — cancel current line, keep running
+            print()
+            continue
 
         line = line.strip()
         if not line:
             continue
 
-        try:
-            keep_going = dispatch(line, cfg)
-        except Exception as exc:  # noqa: BLE001 — surface unexpected errors
-            print(f"[tiny] error: {exc}", file=sys.stderr)
-            keep_going = True
+        tokens = line.split()
+        command, *args = tokens
 
-        if not keep_going:
+        if command == "exit":
             break
 
-    save_history(history_file)
+        handler = DISPATCH.get(command)
+        if handler is None:
+            print(f"{command}: command not found")
+        else:
+            try:
+                handler(args, cfg)
+            except KeyboardInterrupt:
+                # Allow Ctrl-C to abort a running command without killing the shell
+                print()
 
 
 # ---------------------------------------------------------------------------
@@ -331,12 +282,20 @@ def repl(cfg: dict) -> None:
 
 def main() -> None:
     cfg = load_config()
-    setup_readline(
-        history_file=cfg.get("history_file", DEFAULTS["history_file"]),
-        history_size=int(cfg.get("history_size", DEFAULTS["history_size"])),
+    setup_history(cfg)
+
+    completer = ShellCompleter()
+    readline.set_completer(completer.complete)
+    # Use tab for completion; on macOS the default binding is different
+    readline.parse_and_bind(
+        "bind ^I rl_complete" if sys.platform == "darwin" else "tab: complete"
     )
-    print("tiny shell  •  type 'help' for commands, Ctrl-D or 'exit' to quit")
-    repl(cfg)
+    readline.set_completer_delims(" \t\n")
+
+    try:
+        repl(cfg)
+    finally:
+        save_history()
 
 
 if __name__ == "__main__":

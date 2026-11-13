@@ -7,20 +7,27 @@ import { IncomingMessage, ServerResponse } from "node:http";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
 
-export interface Request extends IncomingMessage {
-  params: Record<string, string>;
+export interface RouteParams {
+  [key: string]: string;
+}
+
+export interface AppRequest extends IncomingMessage {
+  params: RouteParams;
   query: Record<string, string>;
   body: unknown;
 }
 
-export interface Response extends ServerResponse {
+export interface AppResponse extends ServerResponse {
   json: (statusCode: number, data: unknown) => void;
-  sendError: (statusCode: number, message: string, details?: unknown) => void;
 }
 
-export type Handler = (req: Request, res: Response) => Promise<void> | void;
-export type ErrorHandler = (err: unknown, req: Request, res: Response) => Promise<void> | void;
-export type Middleware = (req: Request, res: Response, next: (err?: unknown) => void) => void;
+export type Handler = (req: AppRequest, res: AppResponse) => void | Promise<void>;
+
+export type ErrorHandler = (
+  err: unknown,
+  req: AppRequest,
+  res: AppResponse
+) => void | Promise<void>;
 
 interface Route {
   method: HttpMethod;
@@ -30,234 +37,267 @@ interface Route {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers
+// Schema validation helpers
 // ---------------------------------------------------------------------------
 
-export type SchemaType = "string" | "number" | "boolean" | "object" | "array";
+export type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; errors: string[] };
 
-export interface FieldSchema {
-  type: SchemaType;
-  required?: boolean;
-  minLength?: number;
-  maxLength?: number;
-  min?: number;
-  max?: number;
+export type Schema<T> = { validate: (input: unknown) => ValidationResult<T> };
+
+/** Build a schema that checks required string fields and optional string fields. */
+export function objectSchema<T extends Record<string, unknown>>(opts: {
+  required?: (keyof T)[];
+  optional?: (keyof T)[];
+  extraAllowed?: boolean;
+}): Schema<T> {
+  return {
+    validate(input: unknown): ValidationResult<T> {
+      if (typeof input !== "object" || input === null || Array.isArray(input)) {
+        return { ok: false, errors: ["Expected an object"] };
+      }
+      const obj = input as Record<string, unknown>;
+      const errors: string[] = [];
+      for (const key of opts.required ?? []) {
+        if (!(key as string in obj) || obj[key as string] === undefined) {
+          errors.push(`Missing required field: ${String(key)}`);
+        }
+      }
+      if (!opts.extraAllowed) {
+        const allowed = new Set([
+          ...(opts.required ?? []).map(String),
+          ...(opts.optional ?? []).map(String),
+        ]);
+        for (const k of Object.keys(obj)) {
+          if (!allowed.has(k)) errors.push(`Unknown field: ${k}`);
+        }
+      }
+      return errors.length ? { ok: false, errors } : { ok: true, value: input as T };
+    },
+  };
 }
 
-export type Schema = Record<string, FieldSchema>;
-
-export interface ValidationResult {
-  valid: boolean;
-  errors: string[];
-}
-
-export function validate(data: unknown, schema: Schema): ValidationResult {
-  const errors: string[] = [];
-
-  if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return { valid: false, errors: ["Request body must be a JSON object"] };
-  }
-
-  const obj = data as Record<string, unknown>;
-
-  for (const [field, rules] of Object.entries(schema)) {
-    const value = obj[field];
-    const missing = value === undefined || value === null;
-
-    if (missing) {
-      if (rules.required) errors.push(`"${field}" is required`);
-      continue;
-    }
-
-    const actualType = Array.isArray(value) ? "array" : typeof value;
-    if (actualType !== rules.type) {
-      errors.push(`"${field}" must be of type ${rules.type}, got ${actualType}`);
-      continue;
-    }
-
-    if (rules.type === "string" && typeof value === "string") {
-      if (rules.minLength !== undefined && value.length < rules.minLength)
-        errors.push(`"${field}" must be at least ${rules.minLength} characters`);
-      if (rules.maxLength !== undefined && value.length > rules.maxLength)
-        errors.push(`"${field}" must be at most ${rules.maxLength} characters`);
-    }
-
-    if (rules.type === "number" && typeof value === "number") {
-      if (rules.min !== undefined && value < rules.min)
-        errors.push(`"${field}" must be >= ${rules.min}`);
-      if (rules.max !== undefined && value > rules.max)
-        errors.push(`"${field}" must be <= ${rules.max}`);
-    }
-  }
-
-  return { valid: errors.length === 0, errors };
+export function validateBody<T>(
+  body: unknown,
+  schema: Schema<T>
+): ValidationResult<T> {
+  return schema.validate(body);
 }
 
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
-function pathToRegex(path: string): { pattern: RegExp; paramNames: string[] } {
+function compilePath(path: string): { regex: RegExp; paramNames: string[] } {
   const paramNames: string[] = [];
-  const regexStr = path
-    .replace(/[.*+?^${}()|[\]\\]/g, (c) => (c === ":" ? c : `\\${c}`))
-    .replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (_match, name: string) => {
+  const escaped = path
+    .replace(/[-[\]{}()*+?.,\\^$|#\s]/g, (c) =>
+      c === "/" ? "/" : `\\${c}`
+    )
+    .replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, (_match, name: string) => {
       paramNames.push(name);
       return "([^/]+)";
     });
-  return { pattern: new RegExp(`^${regexStr}$`), paramNames };
+  return { regex: new RegExp(`^${escaped}$`), paramNames };
 }
 
 function parseQuery(url: string): Record<string, string> {
   const idx = url.indexOf("?");
   if (idx === -1) return {};
-  return Object.fromEntries(new URLSearchParams(url.slice(idx + 1)));
+  const result: Record<string, string> = {};
+  for (const [k, v] of new URLSearchParams(url.slice(idx + 1))) {
+    result[k] = v;
+  }
+  return result;
 }
 
-function parsePathname(url: string): string {
-  const idx = url.indexOf("?");
-  return idx === -1 ? url : url.slice(0, idx);
-}
-
-class Router {
-  private routes: Route[] = [];
-  private errorHandler: ErrorHandler = defaultErrorHandler;
-  private readonly bodySizeLimit: number;
-
-  constructor(bodySizeLimitBytes = 1024 * 1024 /* 1 MB */) {
-    this.bodySizeLimit = bodySizeLimitBytes;
-  }
-
-  private addRoute(method: HttpMethod, path: string, handler: Handler): this {
-    const { pattern, paramNames } = pathToRegex(path);
-    this.routes.push({ method, pattern, paramNames, handler });
-    return this;
-  }
-
-  get(path: string, handler: Handler): this { return this.addRoute("GET", path, handler); }
-  post(path: string, handler: Handler): this { return this.addRoute("POST", path, handler); }
-  put(path: string, handler: Handler): this { return this.addRoute("PUT", path, handler); }
-  patch(path: string, handler: Handler): this { return this.addRoute("PATCH", path, handler); }
-  delete(path: string, handler: Handler): this { return this.addRoute("DELETE", path, handler); }
-
-  onError(handler: ErrorHandler): this {
-    this.errorHandler = handler;
-    return this;
-  }
-
-  private async readBody(req: IncomingMessage): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-
-      req.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > this.bodySizeLimit) {
-          req.destroy();
-          reject(Object.assign(new Error("Request body too large"), { statusCode: 413 }));
-          return;
-        }
-        chunks.push(chunk);
-      });
-
-      req.on("end", () => {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (!raw) { resolve(undefined); return; }
-        try {
-          resolve(JSON.parse(raw));
-        } catch {
-          reject(Object.assign(new Error("Invalid JSON in request body"), { statusCode: 400 }));
-        }
-      });
-
-      req.on("error", reject);
+async function readBody(req: IncomingMessage, limitBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    let size = 0;
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => {
+      size += Buffer.byteLength(chunk, "utf8");
+      if (size > limitBytes) {
+        req.destroy();
+        reject(new PayloadTooLargeError(limitBytes));
+        return;
+      }
+      data += chunk;
     });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Custom errors
+// ---------------------------------------------------------------------------
+
+export class HttpError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    message: string,
+    public readonly details?: unknown
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
+export class PayloadTooLargeError extends HttpError {
+  constructor(limitBytes: number) {
+    super(413, `Payload exceeds limit of ${limitBytes} bytes`);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+export class NotFoundError extends HttpError {
+  constructor(path: string) {
+    super(404, `Route not found: ${path}`);
+    this.name = "NotFoundError";
+  }
+}
+
+export class ValidationError extends HttpError {
+  constructor(errors: string[]) {
+    super(422, "Validation failed", errors);
+    this.name = "ValidationError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// App (mini framework)
+// ---------------------------------------------------------------------------
+
+export interface AppOptions {
+  bodyLimitBytes?: number;
+}
+
+const DEFAULT_BODY_LIMIT = 1_048_576; // 1 MiB
+
+export function createApp(opts: AppOptions = {}) {
+  const bodyLimit = opts.bodyLimitBytes ?? DEFAULT_BODY_LIMIT;
+  const routes: Route[] = [];
+  let errorHandler: ErrorHandler = defaultErrorHandler;
+
+  function addRoute(method: HttpMethod, path: string, handler: Handler): void {
+    const { regex, paramNames } = compilePath(path);
+    routes.push({ method, pattern: regex, paramNames, handler });
   }
 
-  private enhance(req: IncomingMessage, res: ServerResponse): [Request, Response] {
-    const request = req as Request;
-    request.params = {};
-    request.query = parseQuery(req.url ?? "/");
-    request.body = undefined;
+  const app = {
+    get(path: string, handler: Handler) { addRoute("GET", path, handler); return app; },
+    post(path: string, handler: Handler) { addRoute("POST", path, handler); return app; },
+    put(path: string, handler: Handler) { addRoute("PUT", path, handler); return app; },
+    patch(path: string, handler: Handler) { addRoute("PATCH", path, handler); return app; },
+    delete(path: string, handler: Handler) { addRoute("DELETE", path, handler); return app; },
 
-    const response = res as Response;
+    onError(handler: ErrorHandler) {
+      errorHandler = handler;
+      return app;
+    },
 
-    response.json = (statusCode, data) => {
-      const body = JSON.stringify(data);
-      res.writeHead(statusCode, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Content-Length": Buffer.byteLength(body),
-      });
-      res.end(body);
-    };
+    async handle(rawReq: IncomingMessage, rawRes: ServerResponse): Promise<void> {
+      const req = rawReq as AppRequest;
+      const res = rawRes as AppResponse;
 
-    response.sendError = (statusCode, message, details?) => {
-      response.json(statusCode, { error: message, ...(details !== undefined && { details }) });
-    };
+      // Attach json helper
+      res.json = (statusCode: number, data: unknown) => {
+        const body = JSON.stringify(data);
+        res.writeHead(statusCode, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Length": Buffer.byteLength(body),
+        });
+        res.end(body);
+      };
 
-    return [request, response];
-  }
+      const rawUrl = req.url ?? "/";
+      const pathname = rawUrl.split("?")[0];
+      req.query = parseQuery(rawUrl);
+      req.params = {};
+      req.body = undefined;
 
-  handler(): (req: IncomingMessage, res: ServerResponse) => void {
-    return async (rawReq, rawRes) => {
-      const [req, res] = this.enhance(rawReq, rawRes);
-
-      try {
-        const pathname = parsePathname(req.url ?? "/");
-        const method = req.method as HttpMethod;
-
-        const matched = this.routes.find(
-          (r) => r.method === method && r.pattern.test(pathname)
-        );
-
-        if (!matched) {
-          res.sendError(404, `Cannot ${method} ${pathname}`);
-          return;
-        }
-
-        // Parse params
-        const match = pathname.match(matched.pattern);
-        if (match) {
-          matched.paramNames.forEach((name, i) => {
-            req.params[name] = decodeURIComponent(match[i + 1] ?? "");
-          });
-        }
-
-        // Parse body for methods that carry one
-        if (["POST", "PUT", "PATCH"].includes(method)) {
-          req.body = await this.readBody(req);
-        }
-
-        await matched.handler(req, res);
-      } catch (err) {
+      // Parse body for methods that carry one
+      const method = (req.method ?? "GET").toUpperCase() as HttpMethod;
+      if (["POST", "PUT", "PATCH"].includes(method)) {
         try {
-          await this.errorHandler(err, req, res);
-        } catch {
-          if (!res.headersSent) {
-            res.sendError(500, "Internal server error");
+          const raw = await readBody(req, bodyLimit);
+          if (raw.length > 0) {
+            const ct = req.headers["content-type"] ?? "";
+            if (ct.includes("application/json")) {
+              req.body = JSON.parse(raw);
+            } else {
+              req.body = raw;
+            }
           }
+        } catch (err) {
+          await errorHandler(err, req, res);
+          return;
         }
       }
-    };
-  }
+
+      // Match route
+      for (const route of routes) {
+        if (route.method !== method) continue;
+        const match = pathname.match(route.pattern);
+        if (!match) continue;
+
+        // Extract named params
+        for (let i = 0; i < route.paramNames.length; i++) {
+          req.params[route.paramNames[i]] = decodeURIComponent(match[i + 1]);
+        }
+
+        try {
+          await route.handler(req, res);
+        } catch (err) {
+          await errorHandler(err, req, res);
+        }
+        return;
+      }
+
+      await errorHandler(new NotFoundError(pathname), req, res);
+    },
+
+    listen(port: number, hostname = "127.0.0.1"): http.Server {
+      const server = http.createServer((req, res) => {
+        app.handle(req, res).catch((err) => {
+          console.error("Unhandled error in request pipeline:", err);
+          if (!res.headersSent) res.writeHead(500).end();
+        });
+      });
+
+      server.listen(port, hostname, () => {
+        console.log(`Listening on http://${hostname}:${port}`);
+      });
+
+      return server;
+    },
+  };
+
+  return app;
 }
 
 // ---------------------------------------------------------------------------
 // Default error handler
 // ---------------------------------------------------------------------------
 
-function defaultErrorHandler(err: unknown, _req: Request, res: Response): void {
-  if (res.headersSent) return;
+function defaultErrorHandler(err: unknown, _req: AppRequest, res: AppResponse): void {
+  if (err instanceof HttpError) {
+    const body: Record<string, unknown> = { error: err.message };
+    if (err.details !== undefined) body.details = err.details;
+    res.json(err.statusCode, body);
+    return;
+  }
 
-  const statusCode =
-    typeof err === "object" && err !== null && "statusCode" in err
-      ? (err as { statusCode: number }).statusCode
-      : 500;
+  if (err instanceof SyntaxError) {
+    res.json(400, { error: "Invalid JSON" });
+    return;
+  }
 
-  const message =
-    err instanceof Error ? err.message : "Internal server error";
-
-  res.sendError(statusCode, message);
+  console.error("Internal error:", err);
+  res.json(500, { error: "Internal server error" });
 }
 
 // ---------------------------------------------------------------------------
@@ -272,173 +312,134 @@ export interface Todo {
   updatedAt: string;
 }
 
-interface TodoStore {
-  findAll(): Todo[];
-  findById(id: string): Todo | undefined;
-  create(title: string): Todo;
-  update(id: string, patch: Partial<Pick<Todo, "title" | "completed">>): Todo | undefined;
-  remove(id: string): boolean;
+const store = new Map<string, Todo>();
+let idCounter = 1;
+
+function generateId(): string {
+  return String(idCounter++);
 }
 
-function createTodoStore(): TodoStore {
-  const store = new Map<string, Todo>();
-  let counter = 0;
+// Schemas
+const createTodoSchema = objectSchema<{ title: string; completed?: boolean }>({
+  required: ["title"],
+  optional: ["completed"],
+});
 
-  return {
-    findAll: () => Array.from(store.values()),
+const updateTodoSchema = objectSchema<{ title?: string; completed?: boolean }>({
+  optional: ["title", "completed"],
+});
 
-    findById: (id) => store.get(id),
+// ---------------------------------------------------------------------------
+// Todo route handlers
+// ---------------------------------------------------------------------------
 
-    create: (title) => {
-      const id = String(++counter);
-      const now = new Date().toISOString();
-      const todo: Todo = { id, title, completed: false, createdAt: now, updatedAt: now };
-      store.set(id, todo);
-      return todo;
-    },
+function listTodos(_req: AppRequest, res: AppResponse): void {
+  res.json(200, Array.from(store.values()));
+}
 
-    update: (id, patch) => {
-      const existing = store.get(id);
-      if (!existing) return undefined;
-      const updated: Todo = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-      store.set(id, updated);
-      return updated;
-    },
+function getTodo(req: AppRequest, res: AppResponse): void {
+  const todo = store.get(req.params.id);
+  if (!todo) throw new HttpError(404, `Todo ${req.params.id} not found`);
+  res.json(200, todo);
+}
 
-    remove: (id) => {
-      if (!store.has(id)) return false;
-      store.delete(id);
-      return true;
-    },
+function createTodo(req: AppRequest, res: AppResponse): void {
+  const result = validateBody(req.body, createTodoSchema);
+  if (!result.ok) throw new ValidationError(result.errors);
+
+  const { title, completed = false } = result.value;
+  if (typeof title !== "string" || title.trim().length === 0) {
+    throw new ValidationError(["title must be a non-empty string"]);
+  }
+
+  const now = new Date().toISOString();
+  const todo: Todo = {
+    id: generateId(),
+    title: title.trim(),
+    completed,
+    createdAt: now,
+    updatedAt: now,
   };
+  store.set(todo.id, todo);
+  res.json(201, todo);
+}
+
+function updateTodo(req: AppRequest, res: AppResponse): void {
+  const existing = store.get(req.params.id);
+  if (!existing) throw new HttpError(404, `Todo ${req.params.id} not found`);
+
+  const result = validateBody(req.body, updateTodoSchema);
+  if (!result.ok) throw new ValidationError(result.errors);
+
+  const patch = result.value;
+  if (
+    patch.title !== undefined &&
+    (typeof patch.title !== "string" || patch.title.trim().length === 0)
+  ) {
+    throw new ValidationError(["title must be a non-empty string"]);
+  }
+
+  const updated: Todo = {
+    ...existing,
+    ...(patch.title !== undefined ? { title: patch.title.trim() } : {}),
+    ...(patch.completed !== undefined ? { completed: patch.completed } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  store.set(updated.id, updated);
+  res.json(200, updated);
+}
+
+function deleteTodo(req: AppRequest, res: AppResponse): void {
+  if (!store.has(req.params.id)) {
+    throw new HttpError(404, `Todo ${req.params.id} not found`);
+  }
+  store.delete(req.params.id);
+  res.writeHead(204).end();
 }
 
 // ---------------------------------------------------------------------------
-// Todo route schemas
-// ---------------------------------------------------------------------------
-
-const createTodoSchema: Schema = {
-  title: { type: "string", required: true, minLength: 1, maxLength: 500 },
-};
-
-const updateTodoSchema: Schema = {
-  title: { type: "string", minLength: 1, maxLength: 500 },
-  completed: { type: "boolean" },
-};
-
-// ---------------------------------------------------------------------------
-// Application bootstrap
-// ---------------------------------------------------------------------------
-
-function buildApp(): Router {
-  const router = new Router(512 * 1024 /* 512 KB body limit */);
-  const todos = createTodoStore();
-
-  // Health
-  router.get("/health", (_req, res) => {
-    res.json(200, { status: "ok" });
-  });
-
-  // List all todos
-  router.get("/todos", (_req, res) => {
-    res.json(200, todos.findAll());
-  });
-
-  // Get single todo
-  router.get("/todos/:id", (req, res) => {
-    const todo = todos.findById(req.params.id);
-    if (!todo) { res.sendError(404, `Todo ${req.params.id} not found`); return; }
-    res.json(200, todo);
-  });
-
-  // Create todo
-  router.post("/todos", (req, res) => {
-    const result = validate(req.body, createTodoSchema);
-    if (!result.valid) { res.sendError(400, "Validation failed", result.errors); return; }
-
-    const { title } = req.body as { title: string };
-    const todo = todos.create(title.trim());
-    res.json(201, todo);
-  });
-
-  // Replace todo (full update)
-  router.put("/todos/:id", (req, res) => {
-    if (!todos.findById(req.params.id)) {
-      res.sendError(404, `Todo ${req.params.id} not found`);
-      return;
-    }
-    const result = validate(req.body, createTodoSchema);
-    if (!result.valid) { res.sendError(400, "Validation failed", result.errors); return; }
-
-    const { title } = req.body as { title: string };
-    const todo = todos.update(req.params.id, { title: title.trim(), completed: false });
-    res.json(200, todo);
-  });
-
-  // Partial update
-  router.patch("/todos/:id", (req, res) => {
-    if (!todos.findById(req.params.id)) {
-      res.sendError(404, `Todo ${req.params.id} not found`);
-      return;
-    }
-    const result = validate(req.body, updateTodoSchema);
-    if (!result.valid) { res.sendError(400, "Validation failed", result.errors); return; }
-
-    const patch = req.body as Partial<Pick<Todo, "title" | "completed">>;
-    if (patch.title !== undefined) patch.title = patch.title.trim();
-    const todo = todos.update(req.params.id, patch);
-    res.json(200, todo);
-  });
-
-  // Delete todo
-  router.delete("/todos/:id", (req, res) => {
-    const removed = todos.remove(req.params.id);
-    if (!removed) { res.sendError(404, `Todo ${req.params.id} not found`); return; }
-    res.json(204, null);
-  });
-
-  // Custom error handler
-  router.onError((err, _req, res) => {
-    if (res.headersSent) return;
-
-    if (typeof err === "object" && err !== null && "statusCode" in err) {
-      const { statusCode, message } = err as { statusCode: number; message: string };
-      res.sendError(statusCode, message);
-      return;
-    }
-
-    console.error("[error]", err);
-    res.sendError(500, "Internal server error");
-  });
-
-  return router;
-}
-
-// ---------------------------------------------------------------------------
-// Entry point
+// Bootstrap
 // ---------------------------------------------------------------------------
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "127.0.0.1";
 
-const router = buildApp();
-const server = http.createServer(router.handler());
+const app = createApp({ bodyLimitBytes: 65_536 }); // 64 KiB limit
 
-server.listen(PORT, HOST, () => {
-  console.log(`listening on http://${HOST}:${PORT}`);
-});
+app
+  .get("/todos", listTodos)
+  .get("/todos/:id", getTodo)
+  .post("/todos", createTodo)
+  .patch("/todos/:id", updateTodo)
+  .delete("/todos/:id", deleteTodo);
 
+const server = app.listen(PORT, HOST);
+
+// ---------------------------------------------------------------------------
 // Graceful shutdown
+// ---------------------------------------------------------------------------
+
+let shuttingDown = false;
+
 function shutdown(signal: string): void {
-  console.log(`\n${signal} received — shutting down`);
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\nReceived ${signal}. Shutting down gracefully…`);
+
   server.close((err) => {
     if (err) {
-      console.error("error during shutdown:", err);
+      console.error("Error during shutdown:", err);
       process.exit(1);
     }
-    console.log("server closed");
+    console.log("Server closed.");
     process.exit(0);
   });
+
+  // Force exit after 10 s if connections linger
+  setTimeout(() => {
+    console.error("Forced exit after timeout.");
+    process.exit(1);
+  }, 10_000).unref();
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));

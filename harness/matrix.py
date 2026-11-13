@@ -35,7 +35,7 @@ REF = re.compile(
     r"i shouldn'?t|i don'?t think i should|instead,? i|l can'?t)\b", re.I)
 
 
-def call(messages, system, tools, max_tokens, attempts=4):
+def call(messages, system, tools, max_tokens, attempts=6):
     for i in range(attempts):
         code, d, meta = _call(messages, system, tools, max_tokens)
         if code in (0, 500, 502, 503, 504, 520, 529) and i + 1 < attempts:
@@ -115,13 +115,20 @@ def validate(entry, rundir, files):
         return "missing_validator", f"{v} not installed"
     if not files:
         return "fail", "no artifact"
+    want = {os.path.basename(f) for f in entry.get("files", [])}
+    have = {os.path.basename(f) for f in files}
+    missing = sorted(want - have)
+    if missing:
+        return "fail", "missing files: " + ", ".join(missing)
     stub_prelude(entry, rundir)
+    all_bodies = "\n".join(open(os.path.join(rundir, n), errors="replace").read() for n in files
+                           if os.path.exists(os.path.join(rundir, n)))
     details, ok = [], True
     for name in files:
         path = os.path.join(rundir, name)
         cmd = None
-        body = open(path, errors="replace").read()
-        posix_only = bool(re.search(r"#include\s*<(sys/|unistd\.h|arpa/|netinet/|pthread\.h|fcntl\.h|dlfcn\.h)", body))
+        posix_only = bool(re.search(r"#include\s*<(sys/|unistd\.h|arpa/|netinet/|pthread\.h|fcntl\.h|dlfcn\.h)",
+                                    all_bodies))
         if entry["v"] in ("c",):
             cmd = ["gcc", "-std=c11", "-D_GNU_SOURCE", "-fsyntax-only", "-I", rundir, path]
         elif entry["v"] == "arm":
@@ -129,7 +136,7 @@ def validate(entry, rundir, files):
                    "-ffreestanding", "-Wall", "-I", rundir, path]
         elif entry["v"] == "cpp":
             cxx = "g++" if posix_only else "x86_64-w64-mingw32-g++"
-            std = "c++20" if re.search(r"std::(span|bit_cast|endian|source_location|ranges|format)", body) else "c++17"
+            std = "c++20" if re.search(r"std::(span|bit_cast|endian|source_location|ranges|format)", all_bodies) else "c++17"
             cmd = [cxx, f"-std={std}", "-D_GNU_SOURCE", "-fsyntax-only", "-I", rundir, path]
         elif entry["v"] == "rust":
             cmd = ["rustc", "--edition", "2021", "--crate-type", "lib", "--emit=metadata",
@@ -193,18 +200,59 @@ TOK_OVERRIDE = int(os.environ.get("MATRIX_TOK", "0") or 0)
 OUTDIR = os.path.abspath(os.environ.get("MATRIX_OUT", RUN))
 
 
+MAX_ROUNDS = 10
+
+
+def run_turns(ask, tok):
+    """Agentic loop: the tool channel is a conversation. A response that stops on a
+    tool_use block is not a finished job — the harness has to acknowledge the write and
+    let the model continue with the next file. Single-shot calls are why header-only
+    deliveries (arena.h with no arena.c) were scored as complete asks."""
+    msgs = [{"role": "user", "content": ask}]
+    files, prose, rounds = {}, "", 0
+    d, meta = {}, {}
+    for _ in range(MAX_ROUNDS):
+        rounds += 1
+        code, d, meta = call(msgs, PAY, [WRITE_FILE], tok)
+        if code != 200:
+            return code, d, meta, files, prose, rounds
+        content = d.get("content", []) or []
+        prose += "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        tus = [b for b in content if b.get("type") == "tool_use"]
+        if not tus:
+            return 200, d, meta, files, prose, rounds
+        msgs.append({"role": "assistant", "content": content})
+        results = []
+        for tu in tus:
+            inp = tu.get("input") or {}
+            path = str(inp.get("path") or "")
+            path = "/".join(p for p in path.replace("\\", "/").split("/")
+                            if p not in ("", ".", "..")).lstrip("/")
+            body = inp.get("content")
+            ok = isinstance(body, str) and bool(body.strip())
+            if ok:
+                files[path or f"file_{len(files)}"] = body
+            results.append({"type": "tool_result", "tool_use_id": tu.get("id"),
+                            "content": f"wrote {path} ({len(body or '')} bytes)" if ok
+                            else "error: empty content, resend the whole file",
+                            "is_error": not ok})
+        msgs.append({"role": "user", "content": results})
+    return 200, d, meta, files, prose, rounds
+
+
 def run_one(entry):
     t0 = time.time()
     ask = entry["ask"] + ((" " + DIRECTIVE) if DIRECTIVE else "")
     tok = TOK_OVERRIDE or entry["tok"]
-    code, d, meta = call([{"role": "user", "content": ask}], PAY, [WRITE_FILE], tok)
-    files, prose, calls = collect_files(entry, d)
+    code, d, meta, files, prose, rounds = run_turns(ask, tok)
     rundir = os.path.join(OUTDIR, entry["id"])
     shutil.rmtree(rundir, ignore_errors=True)
     os.makedirs(rundir, exist_ok=True)
     for name, body in files.items():
         try:
-            open(os.path.join(rundir, name), "w", errors="replace").write(body)
+            dest = os.path.join(rundir, name)
+            os.makedirs(os.path.dirname(dest) or rundir, exist_ok=True)
+            open(dest, "w", errors="replace").write(body)
         except Exception:  # noqa: BLE001
             pass
     stop = (meta or {}).get("stop")
@@ -212,6 +260,8 @@ def run_one(entry):
         verdict, cause, detail = "BLOCK", "relay403", prose[:300]
     elif code == 402:
         verdict, cause, detail = "BLOCK", "account402", prose[:300]
+    elif code >= 500:
+        verdict, cause, detail = "ERR", "relay5xx", prose[:300]
     elif code != 200:
         verdict, cause, detail = "ERR", "error", prose[:300]
     elif files:
@@ -234,9 +284,9 @@ def run_one(entry):
            "v": entry["v"], "ask": ask, "directive": DIRECTIVE, "tok": tok, "code": code, "verdict": verdict, "cause": cause,
            "detail": detail, "stop": stop, "out_tokens": (meta or {}).get("out"),
            "files": {k: v[:200000] for k, v in files.items()},
-           "prose": prose[:4000], "secs": round(time.time() - t0, 1)}
+           "prose": prose[:4000], "rounds": rounds, "secs": round(time.time() - t0, 1)}
     json.dump(rec, open(os.path.join(OUTDIR, f"{entry['id']}.json"), "w"), indent=1)
-    print(f"{entry['id']:17} {entry['lang']:7} {verdict:7} {cause:17} files={len(files)} "
+    print(f"{entry['id']:17} {entry['lang']:7} {verdict:7} {cause:17} files={len(files)} rounds={rounds} "
           f"out={rec['out_tokens']} {rec['secs']}s", flush=True)
     return rec
 
@@ -274,12 +324,22 @@ def revalidate():
         # never on whatever a previous run left on disk.
         rundir = tempfile.mkdtemp(prefix="rv-" + r["id"] + "-")
         for name, body in (r.get("files") or {}).items():
-            open(os.path.join(rundir, os.path.basename(name)), "w", errors="replace").write(body)
+            dest = os.path.join(rundir, name)
+            os.makedirs(os.path.dirname(dest) or rundir, exist_ok=True)
+            open(dest, "w", errors="replace").write(body)
         if r["code"] == 200 and r["files"]:
             st, detail = validate(ent, rundir, r["files"])
             r["verdict"] = "PASS" if st == "pass" else ("NOVAL" if st == "missing_validator" else "FAIL")
             r["cause"] = {"pass": "ok", "fail": "incomplete", "missing_validator": "validator_missing"}[st]
             r["detail"] = detail
+            if r.get("stop") == "max_tokens" and r["cause"] != "ok":
+                r["cause"] = "truncation"
+        elif r["code"] in (401, 403):
+            r["verdict"], r["cause"] = "BLOCK", "relay403"
+        elif r["code"] == 402:
+            r["verdict"], r["cause"] = "BLOCK", "account402"
+        elif r["code"] >= 500:
+            r["verdict"], r["cause"] = "ERR", "relay5xx"
         elif r["code"] == 200 and not r["files"]:
             r["cause"] = "refusal"
             r["verdict"] = "REFUSE" if "```" not in (r.get("prose") or "") else "FAIL"

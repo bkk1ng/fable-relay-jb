@@ -1,142 +1,166 @@
 /**
  * useDebouncedQuery
  *
- * A hook that debounces a query string and fetches data from a URL,
- * handling race conditions and in-flight request cancellation.
+ * A hook that debounces a query string, fetches data from a URL, and
+ * handles race conditions, in-flight cancellation, and cleanup on unmount.
  *
- * @param query     - The raw query string to debounce (e.g. from an input)
- * @param fetcher   - Async function that accepts (query, signal) and returns data.
- *                    The AbortSignal is passed so the fetcher can cancel the request.
- * @param options   - Optional configuration
- *   @param delay         - Debounce delay in ms (default: 300)
- *   @param minLength     - Minimum query length before fetching (default: 1)
- *   @param enabled       - Set false to pause all fetching (default: true)
+ * Usage:
  *
- * @returns { data, loading, error, refetch }
- *   - data     Latest successful response, or null
- *   - loading  True while a debounced request is in flight
- *   - error    Last error thrown by the fetcher, or null
- *   - refetch  Imperatively re-run the last query immediately (bypasses debounce)
+ *   const { data, loading, error, refetch } = useDebouncedQuery<User[]>(
+ *     '/api/users?q=' + query,   // url — recomputed whenever query changes
+ *     query,                     // the raw query string to debounce
+ *     { debounceMs: 300 }        // optional config
+ *   );
  *
- * Usage example:
- * ──────────────────────────────────────────────────────────────────────────────
- * interface SearchResult { id: string; title: string }
+ * - `data`    — the parsed JSON response body, or null before the first
+ *               successful response.
+ * - `loading` — true while a debounced request is in flight.
+ * - `error`   — the last Error thrown, or null on success / before first fetch.
+ * - `refetch` — imperatively re-run the latest request (bypasses debounce).
  *
- * const fetcher = async (q: string, signal: AbortSignal): Promise<SearchResult[]> => {
- *   const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal })
- *   if (!res.ok) throw new Error(`HTTP ${res.status}`)
- *   return res.json()
- * }
- *
- * function SearchBox() {
- *   const [input, setInput] = useState('')
- *   const { data, loading, error, refetch } = useDebouncedQuery(input, fetcher, {
- *     delay: 400,
- *     minLength: 2,
- *   })
- *
- *   return (
- *     <>
- *       <input value={input} onChange={e => setInput(e.target.value)} />
- *       {loading && <span>Loading…</span>}
- *       {error && <span>Error: {error.message}</span>}
- *       {data?.map(r => <div key={r.id}>{r.title}</div>)}
- *       <button onClick={refetch}>Refresh</button>
- *     </>
- *   )
- * }
- * ──────────────────────────────────────────────────────────────────────────────
+ * Notes:
+ * - Each new query value cancels the previous in-flight request via
+ *   AbortController before issuing a new one.
+ * - A monotonically incrementing requestId guards against stale responses:
+ *   results from an earlier request that resolves late are silently dropped.
+ * - The debounce timer and any active AbortController are cleaned up when
+ *   the component unmounts.
+ * - Passing an empty string (or any falsy url) skips the fetch entirely.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 export interface UseDebouncedQueryOptions {
-  /** Debounce delay in milliseconds. Default: 300 */
-  delay?: number
-  /** Minimum query length required to trigger a fetch. Default: 1 */
-  minLength?: number
-  /** Set to false to disable fetching entirely. Default: true */
-  enabled?: boolean
+  /** Milliseconds to wait after the last query change before fetching. Default: 300. */
+  debounceMs?: number;
+  /** Additional RequestInit options forwarded to fetch (headers, method, etc.). */
+  fetchOptions?: Omit<RequestInit, 'signal'>;
 }
 
 export interface UseDebouncedQueryResult<T> {
-  data: T | null
-  loading: boolean
-  error: Error | null
-  refetch: () => void
+  data: T | null;
+  loading: boolean;
+  error: Error | null;
+  refetch: () => void;
 }
 
-export type QueryFetcher<T> = (query: string, signal: AbortSignal) => Promise<T>
-
-export function useDebouncedQuery<T>(
+function useDebouncedQuery<T = unknown>(
+  url: string,
   query: string,
-  fetcher: QueryFetcher<T>,
   options: UseDebouncedQueryOptions = {},
 ): UseDebouncedQueryResult<T> {
-  const { delay = 300, minLength = 1, enabled = true } = options
+  const { debounceMs = 300, fetchOptions } = options;
 
-  const [data, setData] = useState<T | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
 
   // Tracks the latest request id so stale responses are discarded.
-  const requestIdRef = useRef(0)
-  // Holds the AbortController for the in-flight request so we can cancel it.
-  const controllerRef = useRef<AbortController | null>(null)
-  // Keeps a stable reference to the latest fetcher without resetting the effect.
-  const fetcherRef = useRef(fetcher)
-  useEffect(() => { fetcherRef.current = fetcher }, [fetcher])
+  const requestIdRef = useRef(0);
 
-  const execute = useCallback((q: string) => {
-    // Cancel any in-flight request before starting a new one.
-    controllerRef.current?.abort()
+  // Holds the AbortController for the currently in-flight request.
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-    if (!enabled || q.length < minLength) {
-      setLoading(false)
-      return
+  // Stable ref to fetchOptions so the execute callback doesn't need it as a dep.
+  const fetchOptionsRef = useRef(fetchOptions);
+  useEffect(() => {
+    fetchOptionsRef.current = fetchOptions;
+  }, [fetchOptions]);
+
+  /**
+   * execute — cancel any in-flight request, then issue a new one.
+   * Accepts the request id captured at call-time so it can detect staleness.
+   */
+  const execute = useCallback(
+    (currentUrl: string, currentRequestId: number) => {
+      // Cancel the previous in-flight request if one exists.
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+
+      if (!currentUrl) {
+        setLoading(false);
+        return;
+      }
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      setLoading(true);
+      setError(null);
+
+      fetch(currentUrl, {
+        ...fetchOptionsRef.current,
+        signal: controller.signal,
+      })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(
+              `Request failed: ${response.status} ${response.statusText}`,
+            );
+          }
+          return response.json() as Promise<T>;
+        })
+        .then((json) => {
+          // Drop results from an earlier request that resolved late.
+          if (currentRequestId !== requestIdRef.current) return;
+          setData(json);
+          setLoading(false);
+        })
+        .catch((err: unknown) => {
+          // AbortError is expected when we cancel — don't surface it as an error.
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          if (currentRequestId !== requestIdRef.current) return;
+          setError(err instanceof Error ? err : new Error(String(err)));
+          setLoading(false);
+        });
+    },
+    [],
+  );
+
+  // Debounced effect: re-runs whenever url or query changes.
+  useEffect(() => {
+    const id = ++requestIdRef.current;
+
+    if (!query) {
+      // Clear state immediately for an empty query.
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
     }
 
-    const controller = new AbortController()
-    controllerRef.current = controller
+    const timer = setTimeout(() => {
+      execute(url, id);
+    }, debounceMs);
 
-    // Increment and capture the id for this request.
-    const id = ++requestIdRef.current
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [url, query, debounceMs, execute]);
 
-    setLoading(true)
-    setError(null)
-
-    fetcherRef.current(q, controller.signal)
-      .then(result => {
-        // Discard the response if a newer request has already been issued.
-        if (id !== requestIdRef.current) return
-        setData(result)
-        setError(null)
-      })
-      .catch(err => {
-        if (id !== requestIdRef.current) return
-        // Ignore intentional cancellations — they're not real errors.
-        if (err instanceof DOMException && err.name === 'AbortError') return
-        setError(err instanceof Error ? err : new Error(String(err)))
-      })
-      .finally(() => {
-        if (id !== requestIdRef.current) return
-        setLoading(false)
-      })
-  }, [enabled, minLength])
-
-  // Debounce: wait for the query to settle before firing.
+  // Cleanup: abort any in-flight request when the component unmounts.
   useEffect(() => {
-    const timer = setTimeout(() => execute(query), delay)
-    return () => clearTimeout(timer)
-  }, [query, delay, execute])
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
-  // Cleanup: abort the in-flight request when the component unmounts.
-  useEffect(() => {
-    return () => { controllerRef.current?.abort() }
-  }, [])
+  /**
+   * refetch — bypasses the debounce and immediately re-issues the request.
+   * Useful for explicit retry after an error.
+   */
+  const refetch = useCallback(() => {
+    const id = ++requestIdRef.current;
+    execute(url, id);
+  }, [url, execute]);
 
-  // Exposes an imperative escape hatch that bypasses the debounce.
-  const refetch = useCallback(() => execute(query), [execute, query])
-
-  return { data, loading, error, refetch }
+  return { data, loading, error, refetch };
 }
+
+export default useDebouncedQuery;

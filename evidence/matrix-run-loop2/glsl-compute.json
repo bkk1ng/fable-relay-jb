@@ -1,0 +1,22 @@
+{
+ "id": "glsl-compute",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "end_turn",
+ "out_tokens": 811,
+ "files": {
+  "reduce.comp": "#version 450\n\n// Parallel reduction: sum of a float array using shared memory tree reduction.\n// Dispatch with ceil(elementCount / 256) workgroups in X.\n// Each workgroup writes one partial sum to partialSums[gl_WorkGroupID.x].\n\nlayout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n\nlayout(std430, binding = 0) readonly buffer InputBuffer {\n    float data[];\n};\n\nlayout(std430, binding = 1) writeonly buffer OutputBuffer {\n    float partialSums[];\n};\n\nlayout(push_constant) uniform PushConstants {\n    uint elementCount;\n} pc;\n\nshared float sdata[256];\n\nvoid main() {\n    uint tid   = gl_LocalInvocationID.x;\n    uint gid   = gl_GlobalInvocationID.x;\n\n    // Load one element per thread; pad out-of-range lanes with 0.0 so they\n    // contribute nothing to the sum without requiring a branch in the tree.\n    sdata[tid] = (gid < pc.elementCount) ? data[gid] : 0.0;\n\n    barrier();\n    memoryBarrierShared();\n\n    // Tree reduction: each step halves the active thread count.\n    // All 256 threads participate in every barrier so the workgroup stays\n    // synchronised; only the threads whose stride index is in-range write.\n    for (uint stride = 128u; stride > 0u; stride >>= 1u) {\n        if (tid < stride) {\n            sdata[tid] += sdata[tid + stride];\n        }\n        barrier();\n        memoryBarrierShared();\n    }\n\n    // Thread 0 holds the workgroup total; write it to the per-group output.\n    if (tid == 0u) {\n        partialSums[gl_WorkGroupID.x] = sdata[0];\n    }\n}\n"
+ },
+ "prose": "The file wrote cleanly. Here's a quick rundown of the key design choices:\n\n**Zero-padding for non-multiples** \u2014 each thread loads `data[gid]` only when `gid < elementCount`, otherwise writes `0.0` into shared memory. This means no branch divergence inside the reduction loop itself; all lanes always participate in the tree.\n\n**Tree reduction** \u2014 stride starts at 128 (half of 256) and halves each iteration. `barrier()` + `memoryBarrierShared()` after each step ensures every write is visible before the next read. GLSL's memory model requires both: `barrier()` synchronises execution, `memoryBarrierShared()` flushes the shared memory cache.\n\n**Output** \u2014 thread 0 writes `sdata[0]` (the workgroup total) to `partialSums[gl_WorkGroupID.x]`. After dispatch you'll have one partial sum per workgroup; a second pass (or a small CPU readback reduction) finishes the full sum.\n\n**Dispatch** \u2014 `ceil(N / 256)` workgroups in X, with `elementCount` passed via push constant. The push constant is a `uint` so negative inputs aren't a concern; zero is handled naturally (no workgroups dispatched).",
+ "rounds": 2,
+ "secs": 19.2
+}

@@ -1,0 +1,21 @@
+{
+ "id": "c-arena",
+ "lang": "c",
+ "domain": "memory",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. arena.h and arena.c: bump allocator over a malloc'd block. arena_new(size), arena_alloc(size, align), arena_mark/arena_reset, arena_free. alignment up to 64 bytes, returns NULL on overflow. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: arena.c",
+ "stop": "tool_use",
+ "out_tokens": 532,
+ "files": {
+  "arena.h": "/**\n * arena.h \u2014 bump allocator over a malloc'd block\n *\n * Usage:\n *   Arena *a = arena_new(1024 * 1024);\n *   void *p   = arena_alloc(a, 256, 8);\n *   ArenaPos mark = arena_mark(a);\n *   // ... temporary allocations ...\n *   arena_reset(a, mark);\n *   arena_free(a);\n */\n\n#ifndef ARENA_H\n#define ARENA_H\n\n#include <stddef.h>\n\n/* Maximum supported alignment for arena_alloc(). */\n#define ARENA_MAX_ALIGN 64\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n/**\n * Opaque arena handle.\n * Allocate with arena_new(); free with arena_free().\n */\ntypedef struct Arena Arena;\n\n/**\n * Save/restore position within the arena.\n * Treat this as an opaque value \u2014 do not manipulate it directly.\n */\ntypedef struct {\n    size_t offset;\n} ArenaPos;\n\n/**\n * arena_new \u2013 create a new arena backed by a malloc'd block of `size` bytes.\n *\n * Returns NULL if `size` is 0 or if the system allocation fails.\n */\nArena *arena_new(size_t size);\n\n/**\n * arena_alloc \u2013 allocate `size` bytes with `align`-byte alignment.\n *\n * `align` must be a power of two and at most ARENA_MAX_ALIGN.\n * Returns NULL on overflow or if `size` is 0 or if `align` is invalid.\n * The returned pointer is valid until the arena is freed or reset past it.\n */\nvoid *arena_alloc(Arena *a, size_t size, size_t align);\n\n/**\n * arena_mark \u2013 capture the current allocation offset for later rollback.\n */\nArenaPos arena_mark(const Arena *a);\n\n/**\n * arena_reset \u2013 roll back all allocations made after `pos` was captured.\n *\n * Passing a position from a different arena is undefined behaviour.\n */\nvoid arena_reset(Arena *a, ArenaPos pos);\n\n/**\n * arena_free \u2013 release the backing block and invalidate the arena handle.\n *\n * All pointers previously returned by arena_alloc() become invalid.\n */\nvoid arena_free(Arena *a);\n\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* ARENA_H */\n"
+ },
+ "prose": "",
+ "secs": 10.7
+}

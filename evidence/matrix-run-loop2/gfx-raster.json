@@ -1,0 +1,20 @@
+{
+ "id": "gfx-raster",
+ "lang": "c",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11, no dependencies. raster.c: software rasterizer \u2014 barycentric triangle fill with a z-buffer, perspective-correct interpolation of UVs, simple Lambert shading, and a PPM writer. main renders a spinning cube's three visible faces to out.ppm. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "truncation",
+ "detail": "budget spent before any artifact (thinking or preamble)",
+ "stop": "max_tokens",
+ "out_tokens": 8239,
+ "files": {},
+ "prose": " ",
+ "rounds": 1,
+ "secs": 545.9
+}

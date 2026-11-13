@@ -1,54 +1,62 @@
 /*
- * ringbuf.h — fixed 4096-byte SPSC ring buffer, C11, no dynamic allocation.
+ * ringbuf.h — fixed 4096-byte SPSC ring buffer (C11, no dynamic allocation)
  *
- * All functions return 0 on success, -1 on error (null pointer, full, empty).
- * rb_len and rb_space return the byte count / free space as a non-negative int,
- * or -1 on a null pointer.
- *
- * Thread safety: single-producer / single-consumer only.
- * rb_push must be called from one thread; rb_pop and rb_peek from one other.
- * rb_len and rb_space are safe to call from either end but give a snapshot.
+ * Thread safety: rb_push is safe from one producer thread;
+ *                rb_pop / rb_peek are safe from one consumer thread.
+ *                rb_len / rb_space give a consistent snapshot but may be
+ *                stale by the time the caller acts on them.
  */
-
 #ifndef RINGBUF_H
 #define RINGBUF_H
 
 #include <stdatomic.h>
-#include <stddef.h>
 #include <stdint.h>
 
-#define RB_CAPACITY 4096U
+#define RB_CAPACITY 4096U   /* must stay a power of two */
+
+typedef struct {
+    uint8_t           buf[RB_CAPACITY];
+    _Atomic uint32_t  head;   /* read  index — consumer advances */
+    _Atomic uint32_t  tail;   /* write index — producer advances */
+} ringbuf_t;
 
 /*
- * Embed head and tail in separate cache-line-sized regions to avoid false
- * sharing between producer and consumer cores.  The 64-byte alignment covers
- * every common architecture; adjust RB_CACHELINE if yours differs.
+ * rb_init  — zero the struct and reset head/tail.
+ *            Returns 0 on success, -1 if rb is NULL.
  */
-#define RB_CACHELINE 64U
-
-struct ringbuf {
-    uint8_t buf[RB_CAPACITY];
-
-    /* consumer advances head; align to its own cache line */
-    _Alignas(RB_CACHELINE) _Atomic size_t head;
-
-    /* producer advances tail; align to its own cache line */
-    _Alignas(RB_CACHELINE) _Atomic size_t tail;
-};
+int rb_init(ringbuf_t *rb);
 
 /*
- * rb_init  — zero the buffer and reset indices.
- * rb_push  — write one byte; fails when the buffer is full.
- * rb_pop   — read and remove one byte; fails when empty.
- * rb_peek  — read without removing; fails when empty.
- * rb_len   — return bytes available to consume, or -1 on null.
- * rb_space — return bytes available to produce, or -1 on null.
+ * rb_push  — write one byte (producer side).
+ *            Returns  0 on success,
+ *                    -1 if rb is NULL or the buffer is full.
  */
-int rb_init(struct ringbuf *rb);
-int rb_push(struct ringbuf *rb, uint8_t byte);
-int rb_pop(struct ringbuf *rb, uint8_t *out);
-int rb_peek(struct ringbuf *rb, uint8_t *out);
-int rb_len(struct ringbuf *rb);
-int rb_space(struct ringbuf *rb);
+int rb_push(ringbuf_t *rb, uint8_t byte);
+
+/*
+ * rb_pop   — read and remove one byte (consumer side).
+ *            Returns  0 on success, *out is set,
+ *                    -1 if rb or out is NULL or the buffer is empty.
+ */
+int rb_pop(ringbuf_t *rb, uint8_t *out);
+
+/*
+ * rb_peek  — read one byte without consuming it (consumer side).
+ *            Returns  0 on success, *out is set,
+ *                    -1 if rb or out is NULL or the buffer is empty.
+ */
+int rb_peek(ringbuf_t *rb, uint8_t *out);
+
+/*
+ * rb_len   — number of bytes currently available to read.
+ *            Returns count [0, RB_CAPACITY] or -1 if rb is NULL.
+ */
+int rb_len(ringbuf_t *rb);
+
+/*
+ * rb_space — number of bytes that can still be written.
+ *            Returns count [0, RB_CAPACITY] or -1 if rb is NULL.
+ */
+int rb_space(ringbuf_t *rb);
 
 #endif /* RINGBUF_H */

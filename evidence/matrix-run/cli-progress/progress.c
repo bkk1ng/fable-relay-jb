@@ -1,19 +1,15 @@
 /*
- * progress.c — reusable ANSI progress bar, C11 / POSIX
+ * progress.c — reusable ANSI terminal progress bar
  *
- * Features
- *   • Determinate and indeterminate modes
- *   • Throughput and ETA estimation with exponential smoothing
- *   • Terminal width detection via ioctl(TIOCGWINSZ)
- *   • Carriage-return redraw (in-place, no scroll)
- *   • Self-contained demo (compile with -DPROGRESS_DEMO)
+ * Features:
+ *   - Determinate mode  (known total: percentage, ETA)
+ *   - Indeterminate mode (unknown total: bouncing slider)
+ *   - Throughput + ETA with exponential smoothing (α = 0.15)
+ *   - Terminal width via ioctl(TIOCGWINSZ), fallback 80
+ *   - Carriage-return in-place redraw, no scrolling
  *
- * Build (library):
- *   cc -std=c11 -D_POSIX_C_SOURCE=200809L -c progress.c
- *
- * Build + run demo:
- *   cc -std=c11 -D_POSIX_C_SOURCE=200809L -DPROGRESS_DEMO \
- *      -o progress_demo progress.c && ./progress_demo
+ * Build:  cc -std=c11 -Wall -Wextra -o progress progress.c
+ * Run:    ./progress
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -22,407 +18,325 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdbool.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 
-/* ── tuning ─────────────────────────────────────────────────────────────── */
-
-/* exponential-smoothing factor for throughput (0 < α ≤ 1).
- * Lower values → smoother but slower to react. */
-#define PB_ALPHA          0.12
-
-/* assumed terminal width when ioctl fails */
-#define PB_FALLBACK_WIDTH 80
-
-/* hard cap so stack buffers stay bounded */
-#define PB_MAX_COLS       512
-
-/* ── bar / spinner glyphs ────────────────────────────────────────────────── */
-
-/* Each of these is a UTF-8 sequence that occupies exactly 1 display column. */
-#define GLYPH_FILL  "\xe2\x96\x88"  /* U+2588 FULL BLOCK           █ */
-#define GLYPH_EMPTY "\xe2\x96\x91"  /* U+2591 LIGHT SHADE          ░ */
-#define GLYPH_HEAD  "\xe2\x96\x8c"  /* U+258C LEFT HALF BLOCK      ▌ */
-
-static const char *SPINNER_FRAMES[] = {
-    "\xe2\xa0\x8b", /* ⠋ */ "\xe2\xa0\x99", /* ⠙ */
-    "\xe2\xa0\xb9", /* ⠹ */ "\xe2\xa0\xb8", /* ⠸ */
-    "\xe2\xa0\xbc", /* ⠼ */ "\xe2\xa0\xb4", /* ⠴ */
-    "\xe2\xa0\xa6", /* ⠦ */ "\xe2\xa0\xa7", /* ⠧ */
-    "\xe2\xa0\x87", /* ⠇ */ "\xe2\xa0\x8f", /* ⠏ */
-};
-#define SPINNER_COUNT ((int)(sizeof(SPINNER_FRAMES) / sizeof(*SPINNER_FRAMES)))
-
-/* ── types ───────────────────────────────────────────────────────────────── */
+/* =========================================================================
+ * Public types
+ * ========================================================================= */
 
 typedef enum {
-    PB_DETERMINATE,
-    PB_INDETERMINATE,
-} PbMode;
+    PROGRESS_DETERMINATE,   /* known total — renders % + ETA  */
+    PROGRESS_INDETERMINATE  /* unknown total — bouncing slider */
+} progress_mode_t;
 
 typedef struct {
-    PbMode      mode;
+    progress_mode_t mode;
 
-    /* determinate state */
-    long        total;      /* expected total item count */
-    long        current;    /* items completed so far    */
+    /* determinate */
+    long            total;          /* expected item count            */
+    long            done;           /* items completed so far         */
 
-    /* timing */
-    struct timespec t_start;
-    struct timespec t_prev;
+    /* wall-clock timing */
+    struct timespec t_start;        /* time at progress_init()        */
+    struct timespec t_last;         /* time of last delta > 0 update  */
 
-    /* exponential-smoothed throughput (items / second) */
-    double      smoothed_rate;
-    bool        rate_seeded;
+    /* exponential-smoothed throughput (items/s) */
+    double          rate_smooth;
+    int             rate_valid;     /* 0 until first measurement      */
 
-    /* indeterminate animation */
-    int         spinner_idx;
-    int         bounce_pos;
-    int         bounce_dir;  /* +1 or -1 */
+    /* indeterminate bounce state */
+    int             bounce_pos;     /* leading-edge column of slider  */
+    int             bounce_dir;     /* +1 right, -1 left              */
 
-    /* optional prefix label (truncated to 32 visible chars) */
-    char        label[128];  /* UTF-8; byte budget > display budget */
+    /* display */
+    const char     *label;          /* short prefix string, or NULL   */
+} progress_t;
 
-    bool        active;
-} ProgressBar;
+/* =========================================================================
+ * Internal helpers
+ * ========================================================================= */
 
-/* ── internal helpers ────────────────────────────────────────────────────── */
-
-/*
- * Count display columns for a UTF-8 string.
- * Assumes every code point occupies exactly 1 column (true for the
- * Latin, block-element, and Braille ranges we use here; CJK wide
- * characters are not expected in labels or glyphs).
- */
-static int pb_display_width(const char *s)
+/* Elapsed seconds between two CLOCK_MONOTONIC snapshots. */
+static double elapsed_sec(const struct timespec *a, const struct timespec *b)
 {
-    int w = 0;
-    while (*s) {
-        unsigned char b = (unsigned char)*s;
-        if      ((b & 0x80) == 0x00) { w++; s += 1; }  /* 1-byte (ASCII) */
-        else if ((b & 0xE0) == 0xC0) { w++; s += 2; }  /* 2-byte          */
-        else if ((b & 0xF0) == 0xE0) { w++; s += 3; }  /* 3-byte          */
-        else if ((b & 0xF8) == 0xF0) { w++; s += 4; }  /* 4-byte          */
-        else                         {      s += 1; }  /* invalid, skip   */
-    }
-    return w;
+    return (double)(b->tv_sec  - a->tv_sec)
+         + (double)(b->tv_nsec - a->tv_nsec) * 1e-9;
 }
 
-static int pb_terminal_width(void)
+/* Terminal column width via ioctl; fallback 80. */
+static int terminal_width(void)
 {
     struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        return (int)ws.ws_col < PB_MAX_COLS ? (int)ws.ws_col : PB_MAX_COLS;
-    return PB_FALLBACK_WIDTH;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 10)
+        return (int)ws.ws_col;
+    return 80;
 }
 
-static double pb_diff_sec(const struct timespec *a, const struct timespec *b)
+/*
+ * Format seconds as "MM:SS" (capped at 99:59).
+ * Writes "??:??" for values that are negative or unrepresentably large.
+ */
+static void fmt_eta(double secs, char *buf, size_t bufsz)
 {
-    return (double)(a->tv_sec  - b->tv_sec)
-         + (double)(a->tv_nsec - b->tv_nsec) * 1e-9;
-}
-
-/* Write a human-readable throughput string into buf. */
-static void pb_fmt_rate(char *buf, size_t sz, double rate)
-{
-    if      (rate >= 1e9) snprintf(buf, sz, "%.2fG/s", rate / 1e9);
-    else if (rate >= 1e6) snprintf(buf, sz, "%.2fM/s", rate / 1e6);
-    else if (rate >= 1e3) snprintf(buf, sz, "%.1fk/s", rate / 1e3);
-    else                  snprintf(buf, sz, "%.0f/s",  rate);
-}
-
-/* Write a human-readable ETA string (mm:ss or h:mm:ss) into buf. */
-static void pb_fmt_eta(char *buf, size_t sz, double secs)
-{
-    if (secs < 0 || secs > 359999.0) {
-        snprintf(buf, sz, "--:--");
+    if (secs < 0.0 || secs > 5999.0) {
+        snprintf(buf, bufsz, "??:??");
         return;
     }
-    int h = (int)(secs / 3600);
-    int m = (int)(secs / 60) % 60;
-    int s = (int)secs % 60;
-    if (h > 0) snprintf(buf, sz, "%d:%02d:%02d", h, m, s);
-    else       snprintf(buf, sz, "%02d:%02d",        m, s);
+    int s = (int)secs;
+    snprintf(buf, bufsz, "%02d:%02d", s / 60, s % 60);
 }
 
 /*
- * Append `count` copies of `glyph` into `dst` (which has `cap` bytes total).
- * Returns updated write position (byte offset past what was written).
+ * Format a throughput rate as "NNN.N/s".
+ * Writes "    -/s" when rate is not yet available (< 0).
  */
-static size_t pb_fill_glyphs(char *dst, size_t cap, size_t pos,
-                              const char *glyph, int count)
+static void fmt_rate(double rate, char *buf, size_t bufsz)
 {
-    size_t glen = strlen(glyph);
-    for (int i = 0; i < count; i++) {
-        if (pos + glen >= cap) break;
-        memcpy(dst + pos, glyph, glen);
-        pos += glen;
+    if (rate < 0.0) {
+        snprintf(buf, bufsz, "    -/s");
+        return;
     }
-    return pos;
+    if (rate >= 1000.0)
+        snprintf(buf, bufsz, "%5.0f/s", rate);
+    else if (rate >= 10.0)
+        snprintf(buf, bufsz, "%5.1f/s", rate);
+    else
+        snprintf(buf, bufsz, "%5.2f/s", rate);
 }
 
-/* ── public API ──────────────────────────────────────────────────────────── */
+/* =========================================================================
+ * Public API
+ * ========================================================================= */
 
 /*
- * pb_init_determinate — initialise for a known-length task.
+ * Initialise a progress bar.
  *
- *   total : expected number of items (must be > 0)
- *   label : optional prefix string (may be NULL)
+ *   p      Caller-allocated progress_t (any storage class is fine).
+ *   mode   PROGRESS_DETERMINATE   — total must be > 0
+ *          PROGRESS_INDETERMINATE — total is ignored
+ *   total  Expected item count (determinate only; pass 0 otherwise).
+ *   label  Short prefix shown to the left of the bar, or NULL.
  */
-void pb_init_determinate(ProgressBar *pb, long total, const char *label)
+void progress_init(progress_t *p, progress_mode_t mode, long total,
+                   const char *label)
 {
-    memset(pb, 0, sizeof(*pb));
-    pb->mode       = PB_DETERMINATE;
-    pb->total      = total > 0 ? total : 1;
-    pb->bounce_dir = 1;
-    if (label)
-        snprintf(pb->label, sizeof(pb->label), "%s", label);
-}
-
-/*
- * pb_init_indeterminate — initialise for an open-ended task.
- *
- *   label : optional prefix string (may be NULL)
- */
-void pb_init_indeterminate(ProgressBar *pb, const char *label)
-{
-    memset(pb, 0, sizeof(*pb));
-    pb->mode       = PB_INDETERMINATE;
-    pb->bounce_dir = 1;
-    if (label)
-        snprintf(pb->label, sizeof(pb->label), "%s", label);
-}
-
-/* pb_start — record the start time; call once before the first pb_update. */
-void pb_start(ProgressBar *pb)
-{
-    clock_gettime(CLOCK_MONOTONIC, &pb->t_start);
-    pb->t_prev = pb->t_start;
-    pb->active = true;
+    memset(p, 0, sizeof(*p));
+    p->mode       = mode;
+    p->total      = (mode == PROGRESS_DETERMINATE && total > 0) ? total : 0;
+    p->label      = label;
+    p->bounce_dir = 1;
+    clock_gettime(CLOCK_MONOTONIC, &p->t_start);
+    p->t_last = p->t_start;
 }
 
 /*
- * pb_update — redraw the bar in place.
+ * Advance the counter by delta_items and redraw the bar.
  *
- *   done : for PB_DETERMINATE, the cumulative items completed so far.
- *          for PB_INDETERMINATE, the value is ignored (pass 0).
+ * Pass delta_items = 0 to force a redraw without advancing (useful for
+ * the final call in progress_finish, or for time-based refresh).
  *
- * Layout (determinate):
- *   [label] NNN% [████████████░░░░░░░░] 1.2k/s ETA 00:14
+ * Throughput smoothing uses α = 0.15:
+ *   rate = α × instant_rate + (1 − α) × rate_prev
  *
- * Layout (indeterminate):
- *   [label] ⠹ [░░░░░░░░░█░░░░░░░░░░░] 847/s
+ * A lower α produces a smoother (slower-reacting) estimate; 0.10–0.20
+ * is a practical range for sub-second updates.
  */
-void pb_update(ProgressBar *pb, long done)
+#define PROGRESS_SMOOTH_ALPHA 0.15
+
+void progress_update(progress_t *p, long delta_items)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    double dt = pb_diff_sec(&now, &pb->t_prev);
+    /* ---- update counter and smoothed rate ------------------------------ */
+    if (delta_items > 0) {
+        p->done += delta_items;
 
-    /* update exponentially-smoothed throughput */
-    if (dt > 1e-6) {
-        long   delta     = (pb->mode == PB_DETERMINATE) ? (done - pb->current) : 1;
-        double inst_rate = (double)delta / dt;
-
-        if (!pb->rate_seeded) {
-            pb->smoothed_rate = inst_rate;
-            pb->rate_seeded   = true;
-        } else {
-            pb->smoothed_rate =
-                PB_ALPHA * inst_rate + (1.0 - PB_ALPHA) * pb->smoothed_rate;
+        double dt = elapsed_sec(&p->t_last, &now);
+        if (dt > 1e-9) {
+            double instant = (double)delta_items / dt;
+            if (!p->rate_valid) {
+                p->rate_smooth = instant;
+                p->rate_valid  = 1;
+            } else {
+                p->rate_smooth = PROGRESS_SMOOTH_ALPHA * instant
+                               + (1.0 - PROGRESS_SMOOTH_ALPHA) * p->rate_smooth;
+            }
         }
+        p->t_last = now;
     }
 
-    if (pb->mode == PB_DETERMINATE)
-        pb->current = done;
+    /* ---- layout -------------------------------------------------------- */
+    int tw = terminal_width();
 
-    pb->t_prev = now;
+    /* Right-side annotation. Build it first so we know its width. */
+    char ann[64];
+    char rate_s[16];
+    fmt_rate(p->rate_valid ? p->rate_smooth : -1.0, rate_s, sizeof(rate_s));
 
-    int cols = pb_terminal_width();
+    if (p->mode == PROGRESS_DETERMINATE) {
+        double frac = (p->total > 0)
+                      ? (double)p->done / (double)p->total
+                      : 0.0;
+        if (frac > 1.0) frac = 1.0;
 
-    /* ── build prefix and suffix strings first; size bar to fit ──────── */
+        double eta_secs = -1.0;
+        if (p->rate_valid && p->rate_smooth > 1e-9 && p->done < p->total)
+            eta_secs = (double)(p->total - p->done) / p->rate_smooth;
+
+        char eta_s[8];
+        fmt_eta(eta_secs, eta_s, sizeof(eta_s));
+        snprintf(ann, sizeof(ann), " %3.0f%% %s ETA %s",
+                 frac * 100.0, rate_s, eta_s);
+    } else {
+        /* Show raw item count — no percentage possible. */
+        snprintf(ann, sizeof(ann), " %7ld items %s", p->done, rate_s);
+    }
+
+    /* Left-side label (truncated to 12 chars, padded). */
+    char prefix[32] = "";
+    if (p->label)
+        snprintf(prefix, sizeof(prefix), "%-12.12s ", p->label);
+
+    int prefix_w = (int)strlen(prefix);
+    int ann_w    = (int)strlen(ann);
 
     /*
-     * bar_buf holds the rendered bar including enclosing brackets.
-     * worst case: PB_MAX_COLS columns × 3 bytes/glyph + 2 brackets + NUL
+     * Bar occupies what's left: prefix [ <inner> ] ann
+     * Keep inner at minimum 4 so the bar is always visible.
      */
-    char bar_buf[PB_MAX_COLS * 3 + 4];
+    int bar_inner = tw - prefix_w - 2 /* brackets */ - ann_w;
+    if (bar_inner < 4) bar_inner = 4;
 
-    char rate_str[20];
-    if (pb->rate_seeded)
-        pb_fmt_rate(rate_str, sizeof(rate_str), pb->smoothed_rate);
-    else
-        snprintf(rate_str, sizeof(rate_str), "  ?/s");
+    /* Use a fixed max-width stack buffer; no terminal is 1 024 columns. */
+    if (bar_inner > 1020) bar_inner = 1020;
 
-    if (pb->mode == PB_DETERMINATE) {
+    char bar[1024];
+    memset(bar, ' ', (size_t)bar_inner);
+    bar[bar_inner] = '\0';
 
-        double pct  = (double)pb->current / (double)pb->total;
-        if (pct > 1.0) pct = 1.0;
-
-        char eta_str[16];
-        double remaining = (pb->smoothed_rate > 0.1)
-                         ? (double)(pb->total - pb->current) / pb->smoothed_rate
-                         : -1.0;
-        pb_fmt_eta(eta_str, sizeof(eta_str), remaining);
-
-        /* prefix: "Label  42% " (note trailing space) */
-        char prefix[256];
-        snprintf(prefix, sizeof(prefix), "%s %3.0f%% ",
-                 pb->label, pct * 100.0);
-
-        /* suffix: " 1.2k/s ETA 01:23" */
-        char suffix[64];
-        snprintf(suffix, sizeof(suffix), " %s ETA %s", rate_str, eta_str);
-
-        int prefix_dw = pb_display_width(prefix);
-        int suffix_dw = pb_display_width(suffix);
-
-        /* bar interior width in columns (2 for the [ ] brackets) */
-        int bar_cols = cols - prefix_dw - suffix_dw - 2;
-        if (bar_cols < 2) bar_cols = 2;
-
-        int filled = (int)(pct * (double)bar_cols);
-        if (filled > bar_cols) filled = bar_cols;
-        int empty  = bar_cols - filled;
-
-        /* render: prefix + [ + fills + empties + ] + suffix */
-        size_t p = 0;
-        bar_buf[p++] = '[';
-        p = pb_fill_glyphs(bar_buf, sizeof(bar_buf), p, GLYPH_FILL,  filled);
-        p = pb_fill_glyphs(bar_buf, sizeof(bar_buf), p, GLYPH_EMPTY, empty);
-        bar_buf[p++] = ']';
-        bar_buf[p]   = '\0';
-
-        fprintf(stdout, "\r%s%s%s", prefix, bar_buf, suffix);
-
+    /* ---- fill the bar -------------------------------------------------- */
+    if (p->mode == PROGRESS_DETERMINATE) {
+        double frac = (p->total > 0)
+                      ? (double)p->done / (double)p->total
+                      : 0.0;
+        if (frac > 1.0) frac = 1.0;
+        int filled = (int)(frac * (double)bar_inner);
+        if (filled > bar_inner) filled = bar_inner;
+        if (filled > 0) memset(bar, '=', (size_t)filled);
+        /* Arrow head: > one column past the fill, unless 100%. */
+        if (filled < bar_inner && frac < 1.0)
+            bar[filled] = '>';
     } else {
+        /*
+         * Bouncing slider: width is ~12% of the bar, minimum 3 chars.
+         * Advance one column per call; reverse direction at both ends.
+         */
+        int slider = bar_inner / 8;
+        if (slider < 3)         slider = 3;
+        if (slider > bar_inner) slider = bar_inner;
 
-        /* spinner + bounce block */
-        const char *spin = SPINNER_FRAMES[pb->spinner_idx];
-        pb->spinner_idx  = (pb->spinner_idx + 1) % SPINNER_COUNT;
+        int max_pos = bar_inner - slider;
+        if (max_pos < 0) max_pos = 0;
 
-        char prefix[256];
-        snprintf(prefix, sizeof(prefix), "%s%s ", pb->label, spin);
-
-        char suffix[32];
-        snprintf(suffix, sizeof(suffix), " %s", rate_str);
-
-        int prefix_dw = pb_display_width(prefix);
-        int suffix_dw = pb_display_width(suffix);
-
-        int bar_cols = cols - prefix_dw - suffix_dw - 2;
-        if (bar_cols < 2) bar_cols = 2;
-
-        /* keep bounce position in range */
-        if (pb->bounce_pos < 0)              { pb->bounce_pos = 0;            pb->bounce_dir =  1; }
-        if (pb->bounce_pos >= bar_cols)      { pb->bounce_pos = bar_cols - 1; pb->bounce_dir = -1; }
-
-        size_t p = 0;
-        bar_buf[p++] = '[';
-        for (int i = 0; i < bar_cols; i++) {
-            const char *g = (i == pb->bounce_pos) ? GLYPH_HEAD : GLYPH_EMPTY;
-            size_t glen   = strlen(g);
-            if (p + glen >= sizeof(bar_buf) - 2) break;
-            memcpy(bar_buf + p, g, glen);
-            p += glen;
+        p->bounce_pos += p->bounce_dir;
+        if (p->bounce_pos >= max_pos) {
+            p->bounce_pos = max_pos;
+            p->bounce_dir = -1;
+        } else if (p->bounce_pos <= 0) {
+            p->bounce_pos = 0;
+            p->bounce_dir = 1;
         }
-        bar_buf[p++] = ']';
-        bar_buf[p]   = '\0';
 
-        pb->bounce_pos += pb->bounce_dir;
-
-        fprintf(stdout, "\r%s%s%s", prefix, bar_buf, suffix);
+        for (int i = p->bounce_pos;
+             i < p->bounce_pos + slider && i < bar_inner; ++i)
+            bar[i] = '=';
     }
 
+    /* ---- render -------------------------------------------------------- */
+    /* \r returns to column 0; omitting \n keeps us on the same line.      */
+    printf("\r%s[%s]%s", prefix, bar, ann);
     fflush(stdout);
 }
 
 /*
- * pb_finish — clear the bar line and print a completion summary.
+ * Finalise the progress bar.
  *
- *   msg : custom message (may be NULL for a default "✓ label done" line)
+ * Forces one last redraw (shows 100% in determinate mode), then prints a
+ * newline and a one-line elapsed-time + average-throughput summary.
  */
-void pb_finish(ProgressBar *pb, const char *msg)
+void progress_finish(progress_t *p)
 {
-    if (!pb->active) return;
+    progress_update(p, 0);
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    double elapsed = pb_diff_sec(&now, &pb->t_start);
+    double total_secs = elapsed_sec(&p->t_start, &now);
 
-    char rate_str[20];
-    if (pb->rate_seeded)
-        pb_fmt_rate(rate_str, sizeof(rate_str), pb->smoothed_rate);
-    else
-        snprintf(rate_str, sizeof(rate_str), "?/s");
+    char rate_s[16];
+    double avg = (p->done > 0 && total_secs > 1e-9)
+                 ? (double)p->done / total_secs : 0.0;
+    fmt_rate(avg, rate_s, sizeof(rate_s));
 
-    int cols = pb_terminal_width();
-
-    /* overwrite the bar line with blanks, then print summary */
-    fprintf(stdout, "\r%*s\r", cols - 1, "");
-
-    if (msg) {
-        fprintf(stdout, "✓ %s  (%.1fs, %s)\n", msg, elapsed, rate_str);
-    } else {
-        const char *name = pb->label[0] ? pb->label : "done";
-        fprintf(stdout, "✓ %s  %.1fs  %s\n", name, elapsed, rate_str);
-    }
-
-    fflush(stdout);
-    pb->active = false;
+    printf("\n  finished: %ld items in %.2f s  avg %s\n",
+           p->done, total_secs, rate_s);
 }
 
-/* ── demo ────────────────────────────────────────────────────────────────── */
+/* =========================================================================
+ * Demo
+ * ========================================================================= */
 
-#ifdef PROGRESS_DEMO
-
-#include <stdlib.h>   /* rand() */
-
-static void demo_sleep_ms(long ms)
+static void sleep_ms(int ms)
 {
-    struct timespec ts = { ms / 1000L, (ms % 1000L) * 1000000L };
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }
 
 int main(void)
 {
-    srand(42);
-    const int N = 200;
+    progress_t p;
 
-    /* ── determinate: 200 items with jittered delay ───────────────────── */
-    printf("Determinate mode — %d items\n", N);
+    /* ------------------------------------------------------------------ */
+    /* Determinate: 200 items, variable speed to exercise ETA smoothing.  */
+    /* ------------------------------------------------------------------ */
+    printf("Determinate mode (200 items):\n");
+    progress_init(&p, PROGRESS_DETERMINATE, 200, "loading");
 
-    ProgressBar pb;
-    pb_init_determinate(&pb, N, "loading");
-    pb_start(&pb);
+    for (int i = 0; i < 200; ++i) {
+        /*
+         * Deliberately vary the per-item delay so the smoothed ETA has
+         * something interesting to track: slow start, fast middle, slow end.
+         */
+        int delay_ms;
+        if      (i <  40)              delay_ms = 30;
+        else if (i < 100)              delay_ms = 10;
+        else if (i < 160)              delay_ms = 20;
+        else                           delay_ms = 35;
 
-    for (int i = 0; i <= N; i++) {
-        pb_update(&pb, i);
-        demo_sleep_ms(10 + rand() % 25);   /* jitter exercises smoothing */
+        sleep_ms(delay_ms);
+        progress_update(&p, 1);
     }
+    progress_finish(&p);
 
-    pb_finish(&pb, NULL);
+    sleep_ms(600);
 
-    /* ── indeterminate: 3-second scan ────────────────────────────────── */
-    printf("\nIndeterminate mode — 3 seconds\n");
+    /* ------------------------------------------------------------------ */
+    /* Indeterminate: 200 items, jittered timing to test rate smoothing.  */
+    /* ------------------------------------------------------------------ */
+    printf("\nIndeterminate mode (200 items, total unknown):\n");
+    progress_init(&p, PROGRESS_INDETERMINATE, 0, "scanning");
 
-    pb_init_indeterminate(&pb, "scanning");
-    pb_start(&pb);
-
-    struct timespec t0, tn;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    do {
-        pb_update(&pb, 0);
-        demo_sleep_ms(60);
-        clock_gettime(CLOCK_MONOTONIC, &tn);
-    } while (pb_diff_sec(&tn, &t0) < 3.0);
-
-    pb_finish(&pb, "scan complete");
+    for (int i = 0; i < 200; ++i) {
+        /* Jitter in [10, 40] ms */
+        int delay_ms = 10 + (i % 7) * 5;
+        sleep_ms(delay_ms);
+        progress_update(&p, 1);
+    }
+    progress_finish(&p);
 
     return 0;
 }
-
-#endif /* PROGRESS_DEMO */

@@ -1,60 +1,58 @@
-/*
+/**
  * arena.h — bump allocator over a malloc'd block (C11)
  *
- * Usage:
- *   Arena *a = arena_new(1024 * 1024);
- *   void *p   = arena_alloc(a, 256, 16);
- *   ArenaPos mark = arena_mark(a);
+ * Typical use:
+ *   Arena *a = arena_new(1 << 20);
+ *   void  *p = arena_alloc(a, 256, 16);
+ *   ArenaMark m = arena_mark(a);
  *   ...
- *   arena_reset(a, mark);
- *   arena_free(a);
+ *   arena_reset(a, m);   // roll back to m
+ *   arena_free(a);       // release everything
  */
 
 #ifndef ARENA_H
 #define ARENA_H
 
 #include <stddef.h>
-#include <stdint.h>
-
-/* Maximum supported alignment (must be a power of two, <= 64). */
-#define ARENA_MAX_ALIGN 64
 
 typedef struct Arena Arena;
 
-/* Opaque position for mark/reset.  Store by value. */
-typedef struct {
-    size_t offset;
-} ArenaPos;
+/**
+ * Opaque cursor snapshot.  Obtain with arena_mark(), pass to
+ * arena_reset() to free everything allocated after that point.
+ */
+typedef size_t ArenaMark;
 
-/*
- * arena_new — allocate an arena backed by a malloc'd block of `size` bytes.
- * Returns NULL if malloc fails or size == 0.
+/**
+ * arena_new – create an arena backed by a malloc'd block of `size` bytes.
+ * Returns NULL if `size` is 0 or the system allocation fails.
  */
 Arena *arena_new(size_t size);
 
-/*
- * arena_alloc — bump-allocate `size` bytes aligned to `align`.
- * `align` must be a power of two in [1, ARENA_MAX_ALIGN].
- * Returns NULL on overflow or if `align` is invalid.
+/**
+ * arena_alloc – bump-allocate `size` bytes aligned to `align` bytes.
+ *
+ * `align` must be a power of two in [1, 64].
+ * Returns NULL on overflow, bad arguments, or NULL arena.
  */
 void *arena_alloc(Arena *a, size_t size, size_t align);
 
-/*
- * arena_mark — capture the current allocation offset so it can be
- * restored later.
+/**
+ * arena_mark – snapshot the current allocation cursor.
+ * Returns 0 if `a` is NULL (safe to pass to arena_reset).
  */
-ArenaPos arena_mark(const Arena *a);
+ArenaMark arena_mark(const Arena *a);
 
-/*
- * arena_reset — restore the arena to a previously captured position,
- * effectively freeing everything allocated after the mark.
- * Passing a position from a different arena is undefined behaviour.
+/**
+ * arena_reset – roll the cursor back to a previously obtained mark,
+ * effectively freeing every allocation made after it.
+ * No-op if `a` is NULL or `mark` is out of range.
  */
-void arena_reset(Arena *a, ArenaPos pos);
+void arena_reset(Arena *a, ArenaMark mark);
 
-/*
- * arena_free — release the backing block and the arena header.
- * The pointer is invalid after this call.
+/**
+ * arena_free – release the backing block and the Arena struct itself.
+ * No-op on NULL.
  */
 void arena_free(Arena *a);
 

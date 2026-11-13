@@ -1,105 +1,88 @@
 /*
- * raster.c — software rasterizer
- * C11, no external dependencies.
+ * raster.c — C11 software rasterizer
  *
  * Features:
- *   - Barycentric triangle fill
- *   - Per-pixel z-buffer (depth test)
+ *   - Barycentric triangle fill with z-buffer
  *   - Perspective-correct UV interpolation
- *   - Lambert diffuse shading
+ *   - Flat Lambert shading
  *   - PPM writer
  *
- * main: renders a spinning cube (three visible faces) to out.ppm.
+ * main() renders a cube at a "spinning" angle (Y=35°, X=22°) so that
+ * three faces are visible via back-face culling, and writes out.ppm.
  *
  * Build:
  *   cc -std=c11 -O2 -o raster raster.c -lm
- * Run:
- *   ./raster
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 #include <float.h>
 
 /* ------------------------------------------------------------------ */
-/* Types                                                                */
+/*  Config                                                              */
 /* ------------------------------------------------------------------ */
 
-typedef struct { float x, y, z; }    Vec3;
+#define WIDTH   640
+#define HEIGHT  640
+
+/* ------------------------------------------------------------------ */
+/*  Math types                                                          */
+/* ------------------------------------------------------------------ */
+
+typedef struct { float x, y, z;    } Vec3;
 typedef struct { float x, y, z, w; } Vec4;
-typedef struct { float u, v; }        Vec2;
-
-typedef struct {
-    float m[4][4];
-} Mat4;
-
-typedef struct {
-    unsigned char r, g, b;
-} Pixel;
+typedef struct { float m[4][4];    } Mat4;
 
 /* ------------------------------------------------------------------ */
-/* Framebuffer                                                           */
+/*  Vec3                                                                */
 /* ------------------------------------------------------------------ */
 
-#define WIDTH  800
-#define HEIGHT 600
+static inline Vec3 v3(float x, float y, float z)
+    { return (Vec3){x, y, z}; }
 
-static Pixel  fb[HEIGHT][WIDTH];
-static float  zb[HEIGHT][WIDTH];   /* depth buffer, +∞ = far */
+static inline Vec3 v3add(Vec3 a, Vec3 b)
+    { return v3(a.x+b.x, a.y+b.y, a.z+b.z); }
 
-static void fb_clear(void) {
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++) {
-            fb[y][x] = (Pixel){30, 30, 40};
-            zb[y][x] = FLT_MAX;
-        }
+static inline Vec3 v3sub(Vec3 a, Vec3 b)
+    { return v3(a.x-b.x, a.y-b.y, a.z-b.z); }
+
+static inline Vec3 v3scale(Vec3 a, float s)
+    { return v3(a.x*s, a.y*s, a.z*s); }
+
+static inline float v3dot(Vec3 a, Vec3 b)
+    { return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+static inline Vec3 v3cross(Vec3 a, Vec3 b) {
+    return v3(a.y*b.z - a.z*b.y,
+              a.z*b.x - a.x*b.z,
+              a.x*b.y - a.y*b.x);
 }
 
-static void ppm_write(const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) { perror(path); return; }
-    fprintf(f, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
-    for (int y = 0; y < HEIGHT; y++)
-        fwrite(fb[y], sizeof(Pixel), WIDTH, f);
-    fclose(f);
+static inline Vec3 v3norm(Vec3 a) {
+    float l = sqrtf(v3dot(a, a));
+    return l > 1e-8f ? v3scale(a, 1.0f / l) : v3(0, 1, 0);
 }
 
 /* ------------------------------------------------------------------ */
-/* Math                                                                  */
+/*  Mat4                                                                */
 /* ------------------------------------------------------------------ */
 
-static Vec3 v3_add(Vec3 a, Vec3 b) { return (Vec3){a.x+b.x, a.y+b.y, a.z+b.z}; }
-static Vec3 v3_sub(Vec3 a, Vec3 b) { return (Vec3){a.x-b.x, a.y-b.y, a.z-b.z}; }
-static Vec3 v3_scale(Vec3 v, float s) { return (Vec3){v.x*s, v.y*s, v.z*s}; }
-static float v3_dot(Vec3 a, Vec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-static Vec3 v3_cross(Vec3 a, Vec3 b) {
-    return (Vec3){ a.y*b.z - a.z*b.y,
-                   a.z*b.x - a.x*b.z,
-                   a.x*b.y - a.y*b.x };
-}
-static Vec3 v3_norm(Vec3 v) {
-    float len = sqrtf(v3_dot(v, v));
-    if (len < 1e-9f) return (Vec3){0,0,1};
-    return v3_scale(v, 1.0f / len);
-}
-
-/* 4×4 identity */
-static Mat4 mat4_identity(void) {
+static inline Mat4 mat4_identity(void) {
     Mat4 m = {0};
     m.m[0][0] = m.m[1][1] = m.m[2][2] = m.m[3][3] = 1.0f;
     return m;
 }
 
-/* column-major multiply */
 static Mat4 mat4_mul(Mat4 a, Mat4 b) {
-    Mat4 r = {0};
+    Mat4 c = {0};
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++)
             for (int k = 0; k < 4; k++)
-                r.m[i][j] += a.m[i][k] * b.m[k][j];
-    return r;
+                c.m[i][j] += a.m[i][k] * b.m[k][j];
+    return c;
 }
 
 static Vec4 mat4_mulv(Mat4 m, Vec4 v) {
@@ -111,310 +94,346 @@ static Vec4 mat4_mulv(Mat4 m, Vec4 v) {
     };
 }
 
+/* Multiply a point (w=1) and return Vec3, discarding w. */
+static inline Vec3 mat4_mulp(Mat4 m, Vec3 p) {
+    Vec4 r = mat4_mulv(m, (Vec4){p.x, p.y, p.z, 1.0f});
+    return v3(r.x, r.y, r.z);
+}
+
+/* Multiply a direction (w=0) — ignores translation. */
+static inline Vec3 mat4_muld(Mat4 m, Vec3 d) {
+    Vec4 r = mat4_mulv(m, (Vec4){d.x, d.y, d.z, 0.0f});
+    return v3(r.x, r.y, r.z);
+}
+
 static Mat4 mat4_rotate_y(float a) {
     Mat4 m = mat4_identity();
-    m.m[0][0] =  cosf(a);
-    m.m[0][2] =  sinf(a);
-    m.m[2][0] = -sinf(a);
-    m.m[2][2] =  cosf(a);
+    float c = cosf(a), s = sinf(a);
+    m.m[0][0] =  c; m.m[0][2] = s;
+    m.m[2][0] = -s; m.m[2][2] = c;
     return m;
 }
 
 static Mat4 mat4_rotate_x(float a) {
     Mat4 m = mat4_identity();
-    m.m[1][1] =  cosf(a);
-    m.m[1][2] = -sinf(a);
-    m.m[2][1] =  sinf(a);
-    m.m[2][2] =  cosf(a);
+    float c = cosf(a), s = sinf(a);
+    m.m[1][1] =  c; m.m[1][2] = -s;
+    m.m[2][1] =  s; m.m[2][2] =  c;
     return m;
 }
 
-static Mat4 mat4_translate(float tx, float ty, float tz) {
-    Mat4 m = mat4_identity();
-    m.m[0][3] = tx;
-    m.m[1][3] = ty;
-    m.m[2][3] = tz;
-    return m;
-}
-
-/* Symmetric perspective — FOV in radians, standard near/far */
-static Mat4 mat4_perspective(float fov, float aspect, float near, float far) {
-    float f = 1.0f / tanf(fov * 0.5f);
+/*
+ * Standard right-handed perspective matrix (maps z from [near,far] to [-1,1]).
+ * fovy in radians.
+ */
+static Mat4 mat4_perspective(float fovy, float aspect, float znear, float zfar) {
     Mat4 m = {0};
-    m.m[0][0] = f / aspect;
-    m.m[1][1] = f;
-    m.m[2][2] = (far + near) / (near - far);
-    m.m[2][3] = (2.0f * far * near) / (near - far);
+    float t = tanf(fovy * 0.5f);
+    m.m[0][0] = 1.0f / (aspect * t);
+    m.m[1][1] = 1.0f / t;
+    m.m[2][2] = -(zfar + znear) / (zfar - znear);
+    m.m[2][3] = -(2.0f * zfar * znear) / (zfar - znear);
     m.m[3][2] = -1.0f;
     return m;
 }
 
-/* ------------------------------------------------------------------ */
-/* Checkerboard procedural texture                                       */
-/* ------------------------------------------------------------------ */
-
-static Pixel tex_checker(float u, float v, Pixel ca, Pixel cb) {
-    int cu = (int)(u * 8.0f) & 1;
-    int cv = (int)(v * 8.0f) & 1;
-    return (cu ^ cv) ? ca : cb;
+/* Right-handed lookAt. */
+static Mat4 mat4_lookat(Vec3 eye, Vec3 center, Vec3 up) {
+    Vec3 f = v3norm(v3sub(center, eye));
+    Vec3 r = v3norm(v3cross(f, up));
+    Vec3 u = v3cross(r, f);
+    Mat4 m = mat4_identity();
+    m.m[0][0] =  r.x; m.m[0][1] =  r.y; m.m[0][2] =  r.z;
+    m.m[1][0] =  u.x; m.m[1][1] =  u.y; m.m[1][2] =  u.z;
+    m.m[2][0] = -f.x; m.m[2][1] = -f.y; m.m[2][2] = -f.z;
+    m.m[0][3] = -v3dot(r, eye);
+    m.m[1][3] = -v3dot(u, eye);
+    m.m[2][3] =  v3dot(f, eye);
+    return m;
 }
 
 /* ------------------------------------------------------------------ */
-/* Rasterizer core                                                       */
+/*  Framebuffer                                                         */
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint8_t r, g, b; } Pixel;
+
+static Pixel fb[HEIGHT][WIDTH];
+static float zb[HEIGHT][WIDTH];  /* NDC depth, initialised to +1 (far) */
+
+static void fb_clear(void) {
+    memset(fb, 20, sizeof fb);   /* dark background */
+    for (int i = 0; i < HEIGHT * WIDTH; i++)
+        ((float *)zb)[i] = 1.0f;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Procedural texture — tiled checkerboard                            */
+/* ------------------------------------------------------------------ */
+
+static Pixel tex_sample(float u, float v) {
+    /* wrap to [0,1) */
+    u = u - floorf(u);
+    v = v - floorf(v);
+    int cu = (int)(u * 8.0f) & 1;
+    int cv = (int)(v * 8.0f) & 1;
+    return (cu ^ cv) ? (Pixel){230, 200, 60} : (Pixel){50, 50, 140};
+}
+
+/* ------------------------------------------------------------------ */
+/*  Rasterizer                                                          */
 /* ------------------------------------------------------------------ */
 
 /*
- * A vertex after vertex processing:
- *   clip  — clip-space Vec4
- *   world — world-space position for lighting
- *   n     — world-space normal (per-vertex, flat face here)
- *   uv    — texture coordinate
+ * Signed 2-D edge function.  Positive when (px,py) is to the left of
+ * the directed edge from A to B (counter-clockwise convention).
  */
-typedef struct {
-    Vec4 clip;
-    Vec3 world;
-    Vec3 n;
-    Vec2 uv;
-} Vert;
-
-static float edge(float ax, float ay, float bx, float by, float px, float py) {
+static inline float edge_fn(float ax, float ay,
+                             float bx, float by,
+                             float px, float py) {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
 
-static float clampf(float v, float lo, float hi) {
-    return v < lo ? lo : v > hi ? hi : v;
-}
+typedef struct {
+    Vec4  clip;    /* position in clip space (before perspective divide) */
+    float u, v;   /* texture coordinates                                 */
+} Vert;
 
 /*
- * draw_triangle — rasterizes one triangle with:
- *   - z-buffer depth test
- *   - perspective-correct UV interpolation
- *   - Lambert shading with ambient + diffuse
+ * draw_triangle — rasterise one triangle.
  *
- * light_dir: normalised direction FROM surface TO light, world space
- * face_col:  base diffuse colour tint (0-1 each channel)
+ *   world_n    : face normal in world space (pre-normalised, flat shading)
+ *   light_dir  : normalised light direction in world space
+ *   shade_base : ambient + per-face Lambert combined to [0,1]
+ *
+ * Performs back-face culling (screen-space winding), perspective-correct UV
+ * interpolation, and depth testing.
  */
-static void draw_triangle(
-    Vert v0, Vert v1, Vert v2,
-    Vec3 light_dir,
-    Vec3 face_col,
-    int use_texture
-) {
-    /* ---- perspective divide to NDC -------------------------------- */
-    if (v0.clip.w <= 0.0f || v1.clip.w <= 0.0f || v2.clip.w <= 0.0f)
-        return;   /* skip if behind camera */
+static void draw_triangle(Vert v0, Vert v1, Vert v2, float shade) {
+    /* ---- perspective divide ---------------------------------------- */
+    if (v0.clip.w <= 0 || v1.clip.w <= 0 || v2.clip.w <= 0) return;
 
-    float inv_w0 = 1.0f / v0.clip.w;
-    float inv_w1 = 1.0f / v1.clip.w;
-    float inv_w2 = 1.0f / v2.clip.w;
+    float iw0 = 1.0f / v0.clip.w;
+    float iw1 = 1.0f / v1.clip.w;
+    float iw2 = 1.0f / v2.clip.w;
 
-    float nx0 = v0.clip.x * inv_w0;
-    float ny0 = v0.clip.y * inv_w0;
-    float nz0 = v0.clip.z * inv_w0;
+    float nx0 = v0.clip.x * iw0, ny0 = v0.clip.y * iw0, nz0 = v0.clip.z * iw0;
+    float nx1 = v1.clip.x * iw1, ny1 = v1.clip.y * iw1, nz1 = v1.clip.z * iw1;
+    float nx2 = v2.clip.x * iw2, ny2 = v2.clip.y * iw2, nz2 = v2.clip.z * iw2;
 
-    float nx1 = v1.clip.x * inv_w1;
-    float ny1 = v1.clip.y * inv_w1;
-    float nz1 = v1.clip.z * inv_w1;
+    /* ---- viewport transform: NDC -> screen pixels ------------------- */
+    float hw = (float)(WIDTH  - 1) * 0.5f;
+    float hh = (float)(HEIGHT - 1) * 0.5f;
 
-    float nx2 = v2.clip.x * inv_w2;
-    float ny2 = v2.clip.y * inv_w2;
-    float nz2 = v2.clip.z * inv_w2;
+    float sx0 = (nx0 + 1.0f) * hw,  sy0 = (1.0f - ny0) * hh;
+    float sx1 = (nx1 + 1.0f) * hw,  sy1 = (1.0f - ny1) * hh;
+    float sx2 = (nx2 + 1.0f) * hw,  sy2 = (1.0f - ny2) * hh;
 
-    /* ---- NDC → screen -------------------------------------------- */
-    float hw = WIDTH  * 0.5f;
-    float hh = HEIGHT * 0.5f;
+    /* ---- back-face cull in screen space ----------------------------- */
+    float area = edge_fn(sx0, sy0, sx1, sy1, sx2, sy2);
+    if (area <= 0.0f) return;   /* CW winding or degenerate */
 
-    float sx0 = ( nx0 + 1.0f) * hw;
-    float sy0 = (-ny0 + 1.0f) * hh;
-    float sx1 = ( nx1 + 1.0f) * hw;
-    float sy1 = (-ny1 + 1.0f) * hh;
-    float sx2 = ( nx2 + 1.0f) * hw;
-    float sy2 = (-ny2 + 1.0f) * hh;
-
-    /* ---- bounding box -------------------------------------------- */
-    int minx = (int)fmaxf(0,         fminf(sx0, fminf(sx1, sx2)));
-    int maxx = (int)fminf(WIDTH - 1, fmaxf(sx0, fmaxf(sx1, sx2)));
-    int miny = (int)fmaxf(0,         fminf(sy0, fminf(sy1, sy2)));
-    int maxy = (int)fminf(HEIGHT- 1, fmaxf(sy0, fmaxf(sy1, sy2)));
-
-    /* ---- total edge area (sign determines winding) --------------- */
-    float area = edge(sx0, sy0, sx1, sy1, sx2, sy2);
-    if (fabsf(area) < 1e-6f) return;   /* degenerate */
     float inv_area = 1.0f / area;
 
-    /* ---- per-vertex Lambert (flat-shaded: same normal per face) --- */
-    /* Use v0's normal; faces share one normal. */
-    Vec3 n = v3_norm(v0.n);
-    float ndotl = fmaxf(0.0f, v3_dot(n, light_dir));
-    float ambient   = 0.18f;
-    float diffuse   = ndotl * 0.82f;
-    float intensity = ambient + diffuse;
+    /* ---- bounding box (clamped to framebuffer) ---------------------- */
+    int minx = (int)fmaxf(0.0f, floorf(fminf(sx0, fminf(sx1, sx2))));
+    int miny = (int)fmaxf(0.0f, floorf(fminf(sy0, fminf(sy1, sy2))));
+    int maxx = (int)fminf((float)(WIDTH  - 1), ceilf(fmaxf(sx0, fmaxf(sx1, sx2))));
+    int maxy = (int)fminf((float)(HEIGHT - 1), ceilf(fmaxf(sy0, fmaxf(sy1, sy2))));
 
-    /* ---- scan ---------------------------------------------------- */
+    /* ---- perspective-correct UV attributes (u/w, v/w) --------------- */
+    float u0w = v0.u * iw0,  uv0w = v0.v * iw0;
+    float u1w = v1.u * iw1,  uv1w = v1.v * iw1;
+    float u2w = v2.u * iw2,  uv2w = v2.v * iw2;
+
+    /* ---- scan -------------------------------------------------------- */
     for (int py = miny; py <= maxy; py++) {
         for (int px = minx; px <= maxx; px++) {
             float pcx = (float)px + 0.5f;
             float pcy = (float)py + 0.5f;
 
-            /* barycentric weights */
-            float w0 = edge(sx1, sy1, sx2, sy2, pcx, pcy) * inv_area;
-            float w1 = edge(sx2, sy2, sx0, sy0, pcx, pcy) * inv_area;
-            float w2 = edge(sx0, sy0, sx1, sy1, pcx, pcy) * inv_area;
+            /* barycentric weights relative to each opposite edge */
+            float w0 = edge_fn(sx1, sy1, sx2, sy2, pcx, pcy);
+            float w1 = edge_fn(sx2, sy2, sx0, sy0, pcx, pcy);
+            float w2 = edge_fn(sx0, sy0, sx1, sy1, pcx, pcy);
 
-            /* point must be inside all three edges */
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
 
-            /* interpolate depth (NDC z) */
-            float z = w0 * nz0 + w1 * nz1 + w2 * nz2;
-            if (z >= zb[py][px]) continue;
-            zb[py][px] = z;
+            float l0 = w0 * inv_area;
+            float l1 = w1 * inv_area;
+            float l2 = w2 * inv_area;
 
-            /* perspective-correct UV:
-             * interpolate u/w and v/w and 1/w, then divide */
-            float u_over_w = w0 * (v0.uv.u * inv_w0)
-                           + w1 * (v1.uv.u * inv_w1)
-                           + w2 * (v2.uv.u * inv_w2);
-            float v_over_w = w0 * (v0.uv.v * inv_w0)
-                           + w1 * (v1.uv.v * inv_w1)
-                           + w2 * (v2.uv.v * inv_w2);
-            float one_over_w = w0 * inv_w0 + w1 * inv_w1 + w2 * inv_w2;
-            float u = u_over_w / one_over_w;
-            float v_tex = v_over_w / one_over_w;
-            u = clampf(u, 0.0f, 1.0f);
-            v_tex = clampf(v_tex, 0.0f, 1.0f);
+            /* ---- depth test (perspective-correct NDC z) -------------- */
+            /*
+             * Interpolate z/w linearly in screen space, then divide by 1/w
+             * (which is also linearly interpolated) to get the true NDC z.
+             */
+            float inv_w  = l0 * iw0 + l1 * iw1 + l2 * iw2;
+            float z_over_w = l0 * (nz0 * iw0) + l1 * (nz1 * iw1) + l2 * (nz2 * iw2);
+            float depth  = z_over_w / inv_w;
 
-            /* colour from texture + shading */
-            Pixel texel;
-            if (use_texture) {
-                Pixel ca = {220, 200, 160};
-                Pixel cb = { 80,  60,  40};
-                texel = tex_checker(u, v_tex, ca, cb);
-            } else {
-                texel = (Pixel){
-                    (unsigned char)(face_col.x * 255.0f),
-                    (unsigned char)(face_col.y * 255.0f),
-                    (unsigned char)(face_col.z * 255.0f)
-                };
-            }
+            if (depth < -1.0f || depth > 1.0f) continue;
+            if (depth >= zb[py][px]) continue;
+            zb[py][px] = depth;
 
-            fb[py][px].r = (unsigned char)clampf(texel.r * intensity, 0, 255);
-            fb[py][px].g = (unsigned char)clampf(texel.g * intensity, 0, 255);
-            fb[py][px].b = (unsigned char)clampf(texel.b * intensity, 0, 255);
+            /* ---- perspective-correct UV ------------------------------ */
+            float u = (l0 * u0w  + l1 * u1w  + l2 * u2w)  / inv_w;
+            float v = (l0 * uv0w + l1 * uv1w + l2 * uv2w) / inv_w;
+
+            /* ---- shade and write ------------------------------------- */
+            Pixel t = tex_sample(u, v);
+            fb[py][px] = (Pixel){
+                (uint8_t)((float)t.r * shade),
+                (uint8_t)((float)t.g * shade),
+                (uint8_t)((float)t.b * shade),
+            };
         }
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* Cube geometry                                                         */
+/*  PPM writer                                                          */
+/* ------------------------------------------------------------------ */
+
+static int write_ppm(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); return 0; }
+    fprintf(f, "P6\n%d %d\n255\n", WIDTH, HEIGHT);
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            Pixel p = fb[y][x];
+            fputc(p.r, f);
+            fputc(p.g, f);
+            fputc(p.b, f);
+        }
+    }
+    fclose(f);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Cube geometry                                                       */
 /* ------------------------------------------------------------------ */
 
 /*
- * Unit cube with 8 vertices.  We define 6 faces; main selects the
- * three that face the camera at the given rotation.
+ * Eight cube corners at ±1.  Index layout:
+ *
+ *       3----2        (back face, z=+1)
+ *      /|   /|
+ *     7----6 |
+ *     | 0--|-1        (front face, z=-1)
+ *     |/   |/
+ *     4----5
+ *
+ *   0=(-1,-1,-1)  1=(+1,-1,-1)  2=(+1,+1,-1)  3=(-1,+1,-1)
+ *   4=(-1,-1,+1)  5=(+1,-1,+1)  6=(+1,+1,+1)  7=(-1,+1,+1)
  */
-static const Vec3 cube_verts[8] = {
-    {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},  /* back  */
-    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1},  /* front */
+static const Vec3 cube_v[8] = {
+    {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
+    {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1},
 };
 
-/* Each face: 4 vertex indices (quad, split to 2 triangles), UV coords,
-   and an outward normal. */
+/*
+ * Six faces; quad indices ordered CCW when viewed from outside,
+ * with their outward world-space normal.
+ *
+ * UVs are assigned at the quad corners in order:
+ *   i0=(0,0), i1=(1,0), i2=(1,1), i3=(0,1)
+ */
 typedef struct {
-    int    idx[4];         /* vertex indices (CCW front face) */
-    Vec2   uv[4];
-    Vec3   normal;
-    Vec3   color;          /* fallback tint if no texture */
+    int  idx[4];  /* vertex indices into cube_v */
+    Vec3 normal;  /* outward face normal (world space, unit length) */
 } Face;
 
 static const Face cube_faces[6] = {
-    /* front (+Z) */
-    { {4,5,6,7}, {{0,1},{1,1},{1,0},{0,0}}, { 0, 0, 1}, {0.9f,0.4f,0.4f} },
-    /* back  (-Z) */
-    { {1,0,3,2}, {{0,1},{1,1},{1,0},{0,0}}, { 0, 0,-1}, {0.4f,0.4f,0.9f} },
-    /* right (+X) */
-    { {5,1,2,6}, {{0,1},{1,1},{1,0},{0,0}}, { 1, 0, 0}, {0.4f,0.9f,0.4f} },
-    /* left  (-X) */
-    { {0,4,7,3}, {{0,1},{1,1},{1,0},{0,0}}, {-1, 0, 0}, {0.9f,0.9f,0.4f} },
-    /* top   (+Y) */
-    { {7,6,2,3}, {{0,1},{1,1},{1,0},{0,0}}, { 0, 1, 0}, {0.4f,0.9f,0.9f} },
-    /* bottom(-Y) */
-    { {0,1,5,4}, {{0,1},{1,1},{1,0},{0,0}}, { 0,-1, 0}, {0.9f,0.4f,0.9f} },
+    /* front  — z = -1 */  { {0, 1, 2, 3}, { 0, 0,-1} },
+    /* back   — z = +1 */  { {5, 4, 7, 6}, { 0, 0, 1} },
+    /* right  — x = +1 */  { {1, 5, 6, 2}, { 1, 0, 0} },
+    /* left   — x = -1 */  { {4, 0, 3, 7}, {-1, 0, 0} },
+    /* top    — y = +1 */  { {3, 2, 6, 7}, { 0, 1, 0} },
+    /* bottom — y = -1 */  { {4, 5, 1, 0}, { 0,-1, 0} },
 };
 
 /* ------------------------------------------------------------------ */
-/* Rendering a frame                                                     */
-/* ------------------------------------------------------------------ */
-
-static void render_frame(float angle_y, float angle_x) {
-    fb_clear();
-
-    /* Model: rotate the cube */
-    Mat4 model = mat4_mul(mat4_rotate_x(angle_x), mat4_rotate_y(angle_y));
-
-    /* View: pull camera back along +Z */
-    Mat4 view  = mat4_translate(0.0f, 0.0f, -4.0f);
-
-    /* Projection: 60° FOV */
-    float fov    = 60.0f * ((float)M_PI / 180.0f);
-    float aspect = (float)WIDTH / (float)HEIGHT;
-    Mat4 proj    = mat4_perspective(fov, aspect, 0.1f, 100.0f);
-
-    Mat4 mv   = mat4_mul(view, model);
-    Mat4 mvp  = mat4_mul(proj, mv);
-
-    /* Light direction in world space (from upper-left-front) */
-    Vec3 light_dir = v3_norm((Vec3){0.6f, 1.0f, 0.8f});
-
-    /* For each face of the cube */
-    for (int fi = 0; fi < 6; fi++) {
-        const Face *f = &cube_faces[fi];
-
-        /* Back-face culling in world space:
-         * transform the face normal by the model matrix's 3×3 part */
-        Vec4 tn = mat4_mulv(model, (Vec4){f->normal.x, f->normal.y, f->normal.z, 0.0f});
-        Vec3 world_n = v3_norm((Vec3){tn.x, tn.y, tn.z});
-
-        /* Camera looks down -Z in view space → (0,0,-1) in world
-         * after the inverse-view.  With our simple translate-only view
-         * the camera direction (surface→camera) for a face centred near
-         * origin is approximately (0,0,1) in world space. */
-        Vec3 view_dir = {0.0f, 0.0f, 1.0f};
-        if (v3_dot(world_n, view_dir) <= 0.0f) continue;  /* back face */
-
-        /* Transform all 4 vertices */
-        Vert qv[4];
-        for (int i = 0; i < 4; i++) {
-            Vec3 wp = cube_verts[f->idx[i]];
-            /* world position */
-            Vec4 wpos = mat4_mulv(model, (Vec4){wp.x, wp.y, wp.z, 1.0f});
-            qv[i].world = (Vec3){wpos.x, wpos.y, wpos.z};
-            qv[i].n     = world_n;
-            qv[i].uv    = f->uv[i];
-            qv[i].clip  = mat4_mulv(mvp, (Vec4){wp.x, wp.y, wp.z, 1.0f});
-        }
-
-        /* Split quad into 2 triangles (0-1-2 and 0-2-3) */
-        draw_triangle(qv[0], qv[1], qv[2], light_dir, f->color, 1);
-        draw_triangle(qv[0], qv[2], qv[3], light_dir, f->color, 1);
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Entry point                                                           */
+/*  main                                                                */
 /* ------------------------------------------------------------------ */
 
 int main(void) {
-    /*
-     * "Spinning cube" — pick an angle that exposes three faces nicely,
-     * as if frozen mid-spin.  Rotating ~35° around Y and ~25° around X
-     * shows the front, right, and top faces simultaneously.
-     */
-    float angle_y = 35.0f * ((float)M_PI / 180.0f);
-    float angle_x = 25.0f * ((float)M_PI / 180.0f);
+    /* ---- matrices --------------------------------------------------- */
+    /* Rotate the cube so three faces are clearly visible. */
+    float angle_y =  0.610865f; /* ≈ 35° */
+    float angle_x = -0.383972f; /* ≈ 22° (tilt down slightly) */
 
-    render_frame(angle_y, angle_x);
-    ppm_write("out.ppm");
+    Mat4 model = mat4_mul(mat4_rotate_x(angle_x), mat4_rotate_y(angle_y));
 
-    printf("Wrote out.ppm (%dx%d)\n", WIDTH, HEIGHT);
+    Vec3 eye    = { 0.0f, 0.0f, 5.0f };
+    Vec3 center = { 0.0f, 0.0f, 0.0f };
+    Vec3 world_up = { 0.0f, 1.0f, 0.0f };
+    Mat4 view   = mat4_lookat(eye, center, world_up);
+
+    float fovy   = 0.785398f; /* 45° in radians */
+    float aspect = (float)WIDTH / (float)HEIGHT;
+    Mat4 proj    = mat4_perspective(fovy, aspect, 0.1f, 100.0f);
+
+    Mat4 mv  = mat4_mul(view, model);
+    Mat4 mvp = mat4_mul(proj, mv);
+
+    /* ---- light ------------------------------------------------------- */
+    /* Single directional light; direction in world space. */
+    Vec3 light_dir = v3norm(v3(1.0f, 1.4f, -0.8f));
+
+    float ambient = 0.12f;
+
+    /* ---- render ------------------------------------------------------ */
+    fb_clear();
+
+    for (int fi = 0; fi < 6; fi++) {
+        const Face *face = &cube_faces[fi];
+
+        /* Transform the outward normal into world space (model matrix).
+         * Since there is no non-uniform scale, the normal matrix equals
+         * the upper-left 3×3 of the model matrix.                        */
+        Vec3 wn = v3norm(mat4_muld(model, face->normal));
+
+        /* Back-face cull: skip faces whose world normal points away from
+         * the camera (dot product of normal with view direction ≥ 0).    */
+        Vec3 face_center = mat4_mulp(model,
+            v3scale(v3add(cube_v[face->idx[0]],
+                    v3add(cube_v[face->idx[1]],
+                    v3add(cube_v[face->idx[2]],
+                          cube_v[face->idx[3]]))), 0.25f));
+
+        Vec3 to_eye = v3sub(eye, face_center);
+        if (v3dot(wn, to_eye) <= 0.0f) continue;
+
+        /* Lambert shading for this face. */
+        float lambert = fmaxf(0.0f, v3dot(wn, light_dir));
+        float shade   = ambient + (1.0f - ambient) * lambert;
+        if (shade > 1.0f) shade = 1.0f;
+
+        /* UV corners for a quad. */
+        static const float quad_u[4] = {0.0f, 1.0f, 1.0f, 0.0f};
+        static const float quad_v[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+
+        /* Transform vertices through MVP. */
+        Vert tv[4];
+        for (int k = 0; k < 4; k++) {
+            Vec3 p = cube_v[face->idx[k]];
+            tv[k].clip = mat4_mulv(mvp, (Vec4){p.x, p.y, p.z, 1.0f});
+            tv[k].u    = quad_u[k];
+            tv[k].v    = quad_v[k];
+        }
+
+        /* Split quad into two CCW triangles: (0,1,2) and (0,2,3). */
+        draw_triangle(tv[0], tv[1], tv[2], shade);
+        draw_triangle(tv[0], tv[2], tv[3], shade);
+    }
+
+    /* ---- output ------------------------------------------------------ */
+    if (write_ppm("out.ppm"))
+        puts("wrote out.ppm");
+    else
+        return 1;
+
     return 0;
 }

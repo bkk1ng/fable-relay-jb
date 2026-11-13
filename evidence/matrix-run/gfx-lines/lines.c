@@ -2,26 +2,24 @@
  * lines.c — C11, no dependencies
  *
  * Features:
- *   - 8-bit framebuffer with putpixel bounds checking
+ *   - 8-bit framebuffer with bounds-checked putpixel
+ *   - Bresenham line drawing
  *   - Cohen-Sutherland line clipping to a viewport
- *   - Bresenham line drawing (integer only)
- *   - Midpoint circle (8-way symmetry)
- *   - Filled circle (scanline fill via midpoint)
- *   - PGM (P5 binary) dump to stdout or a named file
- *   - main() draws a clipped test pattern
+ *   - Midpoint circle (outline)
+ *   - Filled circle
+ *   - PGM (P5 binary) dump to stdout
  *
  * Build:
- *   cc -std=c11 -O2 -Wall -Wextra -o lines lines.c
+ *   cc -std=c11 -O2 -Wall -Wextra -o lines lines.c -lm
  *
  * Run:
  *   ./lines > out.pgm
- *   open out.pgm   (macOS Preview, feh, GIMP, etc.)
  */
 
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
 
 /* -------------------------------------------------------------------------
@@ -34,74 +32,78 @@ typedef struct {
     uint8_t *pixels;   /* row-major, top-left origin */
 } Framebuffer;
 
-/* Allocate a zeroed framebuffer.  Returns NULL on failure. */
-static Framebuffer *fb_create(int width, int height)
+/* Returns 0 on success, -1 on allocation failure. */
+static int fb_init(Framebuffer *fb, int width, int height)
 {
-    if (width <= 0 || height <= 0) return NULL;
-    Framebuffer *fb = malloc(sizeof *fb);
-    if (!fb) return NULL;
     fb->width  = width;
     fb->height = height;
-    fb->pixels = calloc((size_t)width * (size_t)height, 1);
-    if (!fb->pixels) { free(fb); return NULL; }
-    return fb;
+    fb->pixels = (uint8_t *)calloc((size_t)(width * height), 1);
+    return fb->pixels ? 0 : -1;
 }
 
-static void fb_destroy(Framebuffer *fb)
+static void fb_free(Framebuffer *fb)
 {
-    if (fb) { free(fb->pixels); free(fb); }
+    free(fb->pixels);
+    fb->pixels = NULL;
 }
 
-/* Fill the entire framebuffer with a single grey value. */
 static void fb_clear(Framebuffer *fb, uint8_t value)
 {
-    memset(fb->pixels, value, (size_t)fb->width * (size_t)fb->height);
+    memset(fb->pixels, value, (size_t)(fb->width * fb->height));
 }
 
-/* Write one pixel; silently ignores out-of-bounds coordinates. */
+/* Bounds-checked pixel write.  Silently ignores out-of-range coordinates. */
 static void putpixel(Framebuffer *fb, int x, int y, uint8_t value)
 {
-    if (x < 0 || x >= fb->width || y < 0 || y >= fb->height) return;
-    fb->pixels[(size_t)y * (size_t)fb->width + (size_t)x] = value;
+    if (x < 0 || x >= fb->width || y < 0 || y >= fb->height)
+        return;
+    fb->pixels[y * fb->width + x] = value;
 }
 
-/* Write a PGM binary (P5) image to fp.  Returns 0 on success. */
-static int fb_write_pgm(const Framebuffer *fb, FILE *fp)
+/* PGM binary (P5) dump.  Returns 0 on success, -1 on write error. */
+static int fb_write_pgm(const Framebuffer *fb, FILE *out)
 {
-    if (fprintf(fp, "P5\n%d %d\n255\n", fb->width, fb->height) < 0)
+    if (fprintf(out, "P5\n%d %d\n255\n", fb->width, fb->height) < 0)
         return -1;
-    size_t total = (size_t)fb->width * (size_t)fb->height;
-    if (fwrite(fb->pixels, 1, total, fp) != total) return -1;
+    size_t total = (size_t)(fb->width * fb->height);
+    if (fwrite(fb->pixels, 1, total, out) != total)
+        return -1;
     return 0;
 }
 
 /* -------------------------------------------------------------------------
- * Cohen-Sutherland viewport clipping
+ * Viewport for Cohen-Sutherland clipping
  * ---------------------------------------------------------------------- */
 
-typedef struct { int xmin, ymin, xmax, ymax; } Viewport;
+typedef struct {
+    int xmin, ymin;   /* inclusive */
+    int xmax, ymax;   /* inclusive */
+} Viewport;
 
 /* Region codes */
 #define CS_INSIDE 0
 #define CS_LEFT   1
 #define CS_RIGHT  2
-#define CS_BOTTOM 4   /* y increases downward */
+#define CS_BOTTOM 4
 #define CS_TOP    8
 
 static int cs_code(const Viewport *vp, int x, int y)
 {
     int code = CS_INSIDE;
-    if (x < vp->xmin) code |= CS_LEFT;
+    if      (x < vp->xmin) code |= CS_LEFT;
     else if (x > vp->xmax) code |= CS_RIGHT;
-    if (y < vp->ymin) code |= CS_TOP;
-    else if (y > vp->ymax) code |= CS_BOTTOM;
+    if      (y < vp->ymin) code |= CS_BOTTOM;
+    else if (y > vp->ymax) code |= CS_TOP;
     return code;
 }
 
 /*
- * Clip the segment (x0,y0)-(x1,y1) to *vp using Cohen-Sutherland.
- * Returns 1 if any part of the segment is visible and writes the
- * clipped endpoints back; returns 0 if the segment is entirely outside.
+ * Cohen-Sutherland clip.
+ * Modifies (x0,y0)-(x1,y1) in-place to the clipped segment.
+ * Returns 1 if the segment is (partially) visible, 0 if entirely outside.
+ *
+ * Intersection coordinates are computed with integer arithmetic;
+ * truncation is acceptable for rasterisation purposes.
  */
 static int cs_clip(const Viewport *vp,
                    int *x0, int *y0, int *x1, int *y1)
@@ -110,34 +112,26 @@ static int cs_clip(const Viewport *vp,
     int code1 = cs_code(vp, *x1, *y1);
 
     for (;;) {
-        if (!(code0 | code1))   return 1;   /* trivially inside */
-        if (code0 & code1)      return 0;   /* trivially outside */
+        if (!(code0 | code1)) return 1;   /* trivially inside */
+        if   (code0 & code1)  return 0;   /* trivially outside */
 
-        /* Pick the endpoint that is outside. */
         int code_out = code0 ? code0 : code1;
-        int x, y;
-
-        /* Clamp to the relevant edge.
-         * Integer arithmetic: use the parametric form with rounding. */
         int dx = *x1 - *x0;
         int dy = *y1 - *y0;
+        int x, y;
 
-        if (code_out & CS_BOTTOM) {
-            /* y = vp->ymax */
-            x = *x0 + (dx * (vp->ymax - *y0) + (dy / 2)) / dy;
+        if (code_out & CS_TOP) {
             y = vp->ymax;
-        } else if (code_out & CS_TOP) {
-            /* y = vp->ymin */
-            x = *x0 + (dx * (vp->ymin - *y0) + (dy / 2)) / dy;
+            x = (dy != 0) ? *x0 + dx * (vp->ymax - *y0) / dy : *x0;
+        } else if (code_out & CS_BOTTOM) {
             y = vp->ymin;
+            x = (dy != 0) ? *x0 + dx * (vp->ymin - *y0) / dy : *x0;
         } else if (code_out & CS_RIGHT) {
-            /* x = vp->xmax */
-            y = *y0 + (dy * (vp->xmax - *x0) + (dx / 2)) / dx;
             x = vp->xmax;
+            y = (dx != 0) ? *y0 + dy * (vp->xmax - *x0) / dx : *y0;
         } else {
-            /* x = vp->xmin */
-            y = *y0 + (dy * (vp->xmin - *x0) + (dx / 2)) / dx;
             x = vp->xmin;
+            y = (dx != 0) ? *y0 + dy * (vp->xmin - *x0) / dx : *y0;
         }
 
         if (code_out == code0) {
@@ -151,15 +145,13 @@ static int cs_clip(const Viewport *vp,
 }
 
 /* -------------------------------------------------------------------------
- * Bresenham line drawing (after Cohen-Sutherland clipping)
+ * Bresenham line (no clipping; call cs_clip first if needed)
  * ---------------------------------------------------------------------- */
 
-static void draw_line(Framebuffer *fb, const Viewport *vp,
+static void draw_line(Framebuffer *fb,
                       int x0, int y0, int x1, int y1,
-                      uint8_t colour)
+                      uint8_t value)
 {
-    if (vp && !cs_clip(vp, &x0, &y0, &x1, &y1)) return;
-
     int dx =  abs(x1 - x0);
     int dy = -abs(y1 - y0);
     int sx = (x0 < x1) ? 1 : -1;
@@ -167,7 +159,7 @@ static void draw_line(Framebuffer *fb, const Viewport *vp,
     int err = dx + dy;
 
     for (;;) {
-        putpixel(fb, x0, y0, colour);
+        putpixel(fb, x0, y0, value);
         if (x0 == x1 && y0 == y1) break;
         int e2 = 2 * err;
         if (e2 >= dy) { err += dy; x0 += sx; }
@@ -175,194 +167,157 @@ static void draw_line(Framebuffer *fb, const Viewport *vp,
     }
 }
 
-/* -------------------------------------------------------------------------
- * Midpoint circle (outline only, 8-way symmetry)
- * ---------------------------------------------------------------------- */
-
-static void plot8(Framebuffer *fb, int cx, int cy, int x, int y,
-                  uint8_t colour)
-{
-    putpixel(fb, cx + x, cy + y, colour);
-    putpixel(fb, cx - x, cy + y, colour);
-    putpixel(fb, cx + x, cy - y, colour);
-    putpixel(fb, cx - x, cy - y, colour);
-    putpixel(fb, cx + y, cy + x, colour);
-    putpixel(fb, cx - y, cy + x, colour);
-    putpixel(fb, cx + y, cy - x, colour);
-    putpixel(fb, cx - y, cy - x, colour);
-}
-
-static void draw_circle(Framebuffer *fb, int cx, int cy, int r,
-                        uint8_t colour)
-{
-    if (r < 0) return;
-    int x = 0, y = r;
-    int d = 1 - r;
-    plot8(fb, cx, cy, x, y, colour);
-    while (x < y) {
-        if (d < 0) {
-            d += 2 * x + 3;
-        } else {
-            d += 2 * (x - y) + 5;
-            y--;
-        }
-        x++;
-        plot8(fb, cx, cy, x, y, colour);
-    }
-}
-
-/* -------------------------------------------------------------------------
- * Filled circle (scanline, derived from midpoint boundary)
- * ---------------------------------------------------------------------- */
-
 /*
- * We walk the top-right octant of the boundary to find the half-width of
- * the circle at each scanline, then fill that horizontal span.
+ * Clip to vp, then rasterise.
+ * Returns 1 if any pixels were drawn, 0 if entirely clipped away.
  */
-static void draw_filled_circle(Framebuffer *fb, int cx, int cy, int r,
-                                uint8_t colour)
+static int draw_line_clipped(Framebuffer *fb, const Viewport *vp,
+                             int x0, int y0, int x1, int y1,
+                             uint8_t value)
+{
+    if (!cs_clip(vp, &x0, &y0, &x1, &y1))
+        return 0;
+    draw_line(fb, x0, y0, x1, y1, value);
+    return 1;
+}
+
+/* -------------------------------------------------------------------------
+ * Midpoint circle — outline only
+ * ---------------------------------------------------------------------- */
+
+static void draw_circle(Framebuffer *fb,
+                        int cx, int cy, int r,
+                        uint8_t value)
 {
     if (r < 0) return;
-
-    /* Allocate a half-width table indexed by row offset [0..r]. */
-    int *hw = malloc((size_t)(r + 1) * sizeof *hw);
-    if (!hw) return;
-
-    /* Initialise: nothing guaranteed yet. */
-    for (int i = 0; i <= r; i++) hw[i] = 0;
-
-    /* Walk the boundary and record the rightmost x for each y offset. */
     int x = 0, y = r;
     int d = 1 - r;
-    /* Both (x,y) and (y,x) contribute to half-widths. */
-    hw[y] = x;  /* row offset y → half-width x */
-    hw[x] = y;  /* row offset x → half-width y */
-    while (x < y) {
+
+    while (x <= y) {
+        putpixel(fb, cx + x, cy + y, value);
+        putpixel(fb, cx - x, cy + y, value);
+        putpixel(fb, cx + x, cy - y, value);
+        putpixel(fb, cx - x, cy - y, value);
+        putpixel(fb, cx + y, cy + x, value);
+        putpixel(fb, cx - y, cy + x, value);
+        putpixel(fb, cx + y, cy - x, value);
+        putpixel(fb, cx - y, cy - x, value);
+
         if (d < 0) {
             d += 2 * x + 3;
         } else {
             d += 2 * (x - y) + 5;
-            y--;
+            --y;
         }
-        x++;
-        if (x > hw[y]) hw[y] = x;
-        if (y > hw[x]) hw[x] = y;
+        ++x;
     }
-
-    /* Fill each horizontal span. */
-    for (int dy = 0; dy <= r; dy++) {
-        int w = hw[dy];
-        for (int px = cx - w; px <= cx + w; px++) {
-            putpixel(fb, px, cy - dy, colour);
-            putpixel(fb, px, cy + dy, colour);
-        }
-    }
-
-    free(hw);
 }
 
 /* -------------------------------------------------------------------------
- * Test pattern
+ * Filled circle — scanline spans derived from midpoint stepping
  * ---------------------------------------------------------------------- */
 
-static void draw_test_pattern(Framebuffer *fb)
+static void draw_filled_circle(Framebuffer *fb,
+                               int cx, int cy, int r,
+                               uint8_t value)
 {
-    int W = fb->width;
-    int H = fb->height;
+    if (r < 0) return;
+    int x = 0, y = r;
+    int d = 1 - r;
 
-    /* Viewport sits 10% inside the framebuffer on each side. */
-    Viewport vp = {
-        .xmin = W / 10,
-        .ymin = H / 10,
-        .xmax = W - W / 10 - 1,
-        .ymax = H - H / 10 - 1
-    };
+#define HSPAN(yy, xa, xb)                                   \
+    do {                                                     \
+        int _xa = (xa), _xb = (xb);                         \
+        if (_xa > _xb) { int _t = _xa; _xa = _xb; _xb = _t; } \
+        for (int _xi = _xa; _xi <= _xb; ++_xi)              \
+            putpixel(fb, _xi, (yy), value);                  \
+    } while (0)
 
-    /* --- Draw viewport border (no clipping applied to it) --- */
-    draw_line(fb, NULL, vp.xmin, vp.ymin, vp.xmax, vp.ymin, 180);
-    draw_line(fb, NULL, vp.xmax, vp.ymin, vp.xmax, vp.ymax, 180);
-    draw_line(fb, NULL, vp.xmax, vp.ymax, vp.xmin, vp.ymax, 180);
-    draw_line(fb, NULL, vp.xmin, vp.ymax, vp.xmin, vp.ymin, 180);
+    while (x <= y) {
+        HSPAN(cy + y, cx - x, cx + x);
+        HSPAN(cy - y, cx - x, cx + x);
+        HSPAN(cy + x, cx - y, cx + y);
+        HSPAN(cy - x, cx - y, cx + y);
 
-    /* --- Clipped star-burst from centre --- */
+        if (d < 0) {
+            d += 2 * x + 3;
+        } else {
+            d += 2 * (x - y) + 5;
+            --y;
+        }
+        ++x;
+    }
+#undef HSPAN
+}
+
+/* -------------------------------------------------------------------------
+ * main — clipped test pattern
+ * ---------------------------------------------------------------------- */
+
+int main(void)
+{
+    const int W = 512, H = 512;
+
+    Framebuffer fb;
+    if (fb_init(&fb, W, H) != 0) {
+        fputs("error: could not allocate framebuffer\n", stderr);
+        return 1;
+    }
+    fb_clear(&fb, 20);
+
+    /* Viewport: 40 px inset on every side */
+    Viewport vp = { 40, 40, W - 41, H - 41 };
+
+    /* Viewport border */
+    draw_line(&fb, vp.xmin, vp.ymin, vp.xmax, vp.ymin, 180);
+    draw_line(&fb, vp.xmax, vp.ymin, vp.xmax, vp.ymax, 180);
+    draw_line(&fb, vp.xmax, vp.ymax, vp.xmin, vp.ymax, 180);
+    draw_line(&fb, vp.xmin, vp.ymax, vp.xmin, vp.ymin, 180);
+
     int cx = W / 2, cy = H / 2;
-    int r  = (W < H ? W : H) / 2 + 20;   /* radius beyond the viewport */
-    for (int angle = 0; angle < 360; angle += 15) {
-        double rad = angle * 3.14159265358979 / 180.0;
-        int x1 = cx + (int)(r * cos(rad));
-        int y1 = cy + (int)(r * sin(rad));
-        draw_line(fb, &vp, cx, cy, x1, y1, 220);
+
+    /* Starburst from centre — rays extend well past the viewport */
+    int nrays = 36;
+    for (int i = 0; i < nrays; ++i) {
+        double angle = (2.0 * M_PI * i) / nrays;
+        int ex = (int)(cx + 320.0 * cos(angle));
+        int ey = (int)(cy + 320.0 * sin(angle));
+        draw_line_clipped(&fb, &vp, cx, cy, ex, ey, 230);
     }
 
-    /* --- Clipped diagonal cross --- */
-    draw_line(fb, &vp, 0,   0,   W-1, H-1, 200);
-    draw_line(fb, &vp, W-1, 0,   0,   H-1, 200);
-
-    /* --- Clipped horizontal and vertical axes --- */
-    draw_line(fb, &vp, 0, cy, W-1, cy, 160);
-    draw_line(fb, &vp, cx, 0, cx, H-1, 160);
-
-    /* --- Circle outlines at a few radii --- */
-    int small_r  = (W < H ? W : H) / 8;
-    int medium_r = (W < H ? W : H) / 5;
-    draw_circle(fb, cx, cy, small_r,  240);
-    draw_circle(fb, cx, cy, medium_r, 200);
-
-    /* --- Off-centre filled circles --- */
-    int fr = small_r / 2;
-    draw_filled_circle(fb, cx - medium_r, cy, fr, 128);
-    draw_filled_circle(fb, cx + medium_r, cy, fr, 128);
-    draw_filled_circle(fb, cx, cy - medium_r, fr,  96);
-    draw_filled_circle(fb, cx, cy + medium_r, fr,  96);
-
-    /* --- A few lines that extend beyond the viewport to show clipping --- */
-    draw_line(fb, &vp, -50,       cy,      W + 50, cy - 80, 255);
-    draw_line(fb, &vp, cx - 80,  -50,      cx + 80, H + 50, 255);
-    draw_line(fb, &vp, 0,         H + 100, W,       -100,   210);
-}
-
-/* -------------------------------------------------------------------------
- * Entry point
- * ---------------------------------------------------------------------- */
-
-int main(int argc, char *argv[])
-{
-    int width  = 640;
-    int height = 480;
-
-    Framebuffer *fb = fb_create(width, height);
-    if (!fb) {
-        fprintf(stderr, "lines: failed to allocate framebuffer\n");
-        return EXIT_FAILURE;
+    /* Clipped diagonal grid */
+    for (int k = -W; k < W * 2; k += 48) {
+        draw_line_clipped(&fb, &vp, k,     0, k + H, H,   120);
+        draw_line_clipped(&fb, &vp, k + H, 0, k,     H,   120);
     }
 
-    fb_clear(fb, 30);          /* dark background */
-    draw_test_pattern(fb);
+    /* Lines entirely outside — must not appear */
+    draw_line_clipped(&fb, &vp, -200, -200, -100, -100, 255);
+    draw_line_clipped(&fb, &vp,  600,  600,  700,  700, 255);
 
-    /* Write PGM to a named file or stdout. */
-    FILE *out = stdout;
-    if (argc >= 2) {
-        out = fopen(argv[1], "wb");
-        if (!out) {
-            perror(argv[1]);
-            fb_destroy(fb);
-            return EXIT_FAILURE;
-        }
-    } else {
-        /* stdout: set binary mode on platforms that require it */
-#ifdef _WIN32
-        #include <fcntl.h>
-        #include <io.h>
-        _setmode(_fileno(stdout), _O_BINARY);
-#endif
+    /* Outline circles */
+    draw_circle(&fb, cx, cy, 160, 240);
+    draw_circle(&fb, cx, cy, 100,  80);
+    draw_circle(&fb, cx, cy,  50, 200);
+
+    /* Filled circles at compass points on the outer ring */
+    const int pts[4][2] = { {0,-160}, {0,160}, {-160,0}, {160,0} };
+    for (int i = 0; i < 4; ++i)
+        draw_filled_circle(&fb, cx + pts[i][0], cy + pts[i][1], 18, 210);
+
+    /* Dark filled circle at centre */
+    draw_filled_circle(&fb, cx, cy, 30, 60);
+
+    /* Full-frame diagonals (unclipped, beneath everything) */
+    draw_line(&fb, 0, 0, W - 1, H - 1, 100);
+    draw_line(&fb, W - 1, 0, 0, H - 1, 100);
+
+    if (fb_write_pgm(&fb, stdout) != 0) {
+        fputs("error: could not write PGM\n", stderr);
+        fb_free(&fb);
+        return 1;
     }
 
-    int rc = fb_write_pgm(fb, out);
-    if (rc != 0)
-        fprintf(stderr, "lines: write error\n");
-
-    if (out != stdout) fclose(out);
-    fb_destroy(fb);
-
-    return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    fb_free(&fb);
+    return 0;
 }

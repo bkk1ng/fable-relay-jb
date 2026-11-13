@@ -1,0 +1,20 @@
+{
+ "id": "parse-json",
+ "lang": "ts",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "ts",
+ "ask": "TypeScript strict, no dependencies. json.ts: JSON serializer and parser written from scratch \u2014 stringify with cycle detection and replacer support, parse with position-tracked errors, big-number handling as string option. include self-tests. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "relay5xx",
+ "detail": "",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "",
+ "rounds": 1,
+ "secs": 423.5
+}

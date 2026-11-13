@@ -3,272 +3,359 @@
 csv2db.py — Stream a CSV file into a SQLite database with column type inference.
 
 Usage:
-    python csv2db.py input.csv --db output.db --table my_table
-    python csv2db.py input.csv --db output.db --table my_table --dry-run
-    python csv2db.py input.csv --db output.db --table my_table --null "" "N/A" "NULL"
+    python csv2db.py input.csv --db out.db --table mytable
+    python csv2db.py input.csv --db out.db --table mytable --dry-run
+    python csv2db.py input.csv --db out.db --table mytable --null "" "NA" "N/A"
 """
 
 import argparse
 import csv
 import sqlite3
 import sys
+import re
 from datetime import datetime
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Type inference
+# ---------------------------------------------------------------------------
 
-# ── Type inference ─────────────────────────────────────────────────────────────
-
-DATE_FORMATS = (
+# ISO 8601 and common date/datetime patterns to probe
+_DATE_FORMATS = (
     "%Y-%m-%d",
-    "%Y/%m/%d",
-    "%d-%m-%Y",
-    "%d/%m/%Y",
-    "%m-%d-%Y",
-    "%m/%d/%Y",
     "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%SZ",
     "%Y-%m-%d %H:%M:%S",
+    "%d/%m/%Y",
+    "%m/%d/%Y",
+    "%d-%m-%Y",
+    "%m-%d-%Y",
 )
 
-
-def _try_int(value: str) -> bool:
-    try:
-        int(value)
-        return True
-    except ValueError:
-        return False
+_INT_RE = re.compile(r"^-?\d+$")
+_FLOAT_RE = re.compile(r"^-?\d*\.\d+$|^-?\d+\.\d*$|^-?\d+[eE][+-]?\d+$")
 
 
-def _try_float(value: str) -> bool:
-    try:
-        float(value)
-        return True
-    except ValueError:
-        return False
+def _is_integer(value: str) -> bool:
+    return bool(_INT_RE.match(value))
 
 
-def _try_date(value: str) -> bool:
-    for fmt in DATE_FORMATS:
+def _is_float(value: str) -> bool:
+    return bool(_FLOAT_RE.match(value))
+
+
+def _is_date(value: str) -> bool:
+    for fmt in _DATE_FORMATS:
         try:
             datetime.strptime(value, fmt)
             return True
         except ValueError:
-            continue
+            pass
     return False
 
 
-def infer_column_type(values: list[str], null_markers: set[str]) -> str:
+def infer_column_type(samples: list[str]) -> str:
     """
-    Infer the SQLite affinity for a column given a sample of its non-null string values.
-    Priority: INTEGER > REAL > DATE (stored as TEXT ISO-8601) > TEXT.
+    Given a list of non-null sample values for one column, return the
+    SQLite affinity: INTEGER, REAL, TEXT, or DATE (stored as TEXT).
+    Falls back toward TEXT on any mismatch.
     """
-    non_null = [v for v in values if v not in null_markers]
-    if not non_null:
+    if not samples:
         return "TEXT"
 
-    if all(_try_int(v) for v in non_null):
-        return "INTEGER"
-    if all(_try_float(v) for v in non_null):
-        return "REAL"
-    if all(_try_date(v) for v in non_null):
-        return "DATE"
-    return "TEXT"
+    candidate = "INTEGER"
+    for val in samples:
+        if candidate == "INTEGER":
+            if _is_integer(val):
+                continue
+            elif _is_float(val):
+                candidate = "REAL"
+            elif _is_date(val):
+                candidate = "DATE"
+            else:
+                return "TEXT"
+        elif candidate == "REAL":
+            if _is_integer(val) or _is_float(val):
+                continue
+            else:
+                return "TEXT"
+        elif candidate == "DATE":
+            if _is_date(val):
+                continue
+            else:
+                return "TEXT"
+
+    return candidate
 
 
-# ── Schema derivation ──────────────────────────────────────────────────────────
+def coerce(value: str, col_type: str):
+    """Convert a string value to the appropriate Python type for SQLite binding."""
+    if col_type == "INTEGER":
+        return int(value)
+    if col_type == "REAL":
+        return float(value)
+    # DATE and TEXT: store as-is
+    return value
 
-def derive_schema(
+
+# ---------------------------------------------------------------------------
+# Schema inference from a sample of rows
+# ---------------------------------------------------------------------------
+
+SAMPLE_ROWS = 500  # rows to read before committing to types
+
+
+def infer_schema(
     csv_path: Path,
-    table: str,
     null_markers: set[str],
-    sample_rows: int = 500,
-) -> dict[str, str]:
+    delimiter: str,
+    encoding: str,
+) -> tuple[list[str], list[str]]:
     """
-    Read up to `sample_rows` rows and return an ordered dict of {column: sqlite_type}.
+    Read up to SAMPLE_ROWS rows, then return (column_names, column_types).
     """
-    with csv_path.open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames is None:
-            raise ValueError("CSV file has no header row.")
+    columns: list[str] = []
+    samples: dict[int, list[str]] = {}  # col_index -> non-null values
 
-        columns = list(reader.fieldnames)
-        samples: dict[str, list[str]] = {col: [] for col in columns}
+    with csv_path.open(newline="", encoding=encoding) as fh:
+        reader = csv.reader(fh, delimiter=delimiter)
+        try:
+            columns = next(reader)
+        except StopIteration:
+            print("error: CSV file is empty or has no header row", file=sys.stderr)
+            sys.exit(1)
 
-        for i, row in enumerate(reader):
-            if i >= sample_rows:
+        samples = {i: [] for i in range(len(columns))}
+
+        for row_num, row in enumerate(reader, start=1):
+            if row_num > SAMPLE_ROWS:
                 break
-            for col in columns:
-                samples[col].append(row.get(col, ""))
+            for i, cell in enumerate(row):
+                if i >= len(columns):
+                    break
+                stripped = cell.strip()
+                if stripped and stripped not in null_markers:
+                    samples[i].append(stripped)
 
-    return {col: infer_column_type(samples[col], null_markers) for col in columns}
+    types = [infer_column_type(samples[i]) for i in range(len(columns))]
+    return columns, types
 
 
-# ── DDL / DML helpers ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# DDL helpers
+# ---------------------------------------------------------------------------
 
-def build_create_sql(table: str, schema: dict[str, str]) -> str:
+def _quote(name: str) -> str:
+    """Double-quote an identifier, escaping any embedded quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def build_create_table(table: str, columns: list[str], types: list[str]) -> str:
     col_defs = ",\n    ".join(
-        f'"{col}" {dtype}' for col, dtype in schema.items()
+        f"{_quote(col)} {typ}" for col, typ in zip(columns, types)
     )
-    return f'CREATE TABLE IF NOT EXISTS "{table}" (\n    {col_defs}\n);'
+    return f"CREATE TABLE IF NOT EXISTS {_quote(table)} (\n    {col_defs}\n);"
 
 
-def build_insert_sql(table: str, columns: list[str]) -> str:
-    col_list = ", ".join(f'"{c}"' for c in columns)
-    placeholders = ", ".join("?" for _ in columns)
-    return f'INSERT INTO "{table}" ({col_list}) VALUES ({placeholders});'
+# ---------------------------------------------------------------------------
+# Streaming insert
+# ---------------------------------------------------------------------------
+
+BATCH_SIZE = 500
 
 
-# ── Import logic ───────────────────────────────────────────────────────────────
-
-def coerce_value(raw: str, dtype: str, null_markers: set[str]):
-    """Convert a raw CSV string to the appropriate Python type for SQLite binding."""
-    if raw in null_markers:
-        return None
-    if dtype == "INTEGER":
-        return int(raw)
-    if dtype == "REAL":
-        return float(raw)
-    # DATE and TEXT are stored as strings; SQLite handles the affinity.
-    return raw
-
-
-def stream_csv_to_db(
-    csv_path: Path,
-    db_path: Path,
+def stream_insert(
+    conn: sqlite3.Connection,
     table: str,
-    schema: dict[str, str],
+    csv_path: Path,
+    columns: list[str],
+    types: list[str],
     null_markers: set[str],
-    batch_size: int = 500,
+    delimiter: str,
+    encoding: str,
 ) -> int:
     """
-    Stream the CSV into SQLite using batched transactions.
+    Stream the CSV into the database in batched transactions.
     Returns the total number of rows inserted.
     """
-    columns = list(schema.keys())
-    insert_sql = build_insert_sql(table, columns)
+    placeholders = ", ".join("?" for _ in columns)
+    col_list = ", ".join(_quote(c) for c in columns)
+    insert_sql = (
+        f"INSERT INTO {_quote(table)} ({col_list}) VALUES ({placeholders})"
+    )
 
-    total = 0
+    total_rows = 0
     batch: list[tuple] = []
 
-    con = sqlite3.connect(db_path)
-    try:
-        con.execute(build_create_sql(table, schema))
-        con.commit()
+    with csv_path.open(newline="", encoding=encoding) as fh:
+        reader = csv.reader(fh, delimiter=delimiter)
+        next(reader)  # skip header
 
-        with csv_path.open(newline="", encoding="utf-8-sig") as fh:
-            reader = csv.DictReader(fh)
+        for row_num, row in enumerate(reader, start=2):  # 2 = first data line
+            # Pad short rows, truncate long ones silently
+            padded: list = list(row) + [""] * max(0, len(columns) - len(row))
+            padded = padded[: len(columns)]
 
-            for row in reader:
-                record = tuple(
-                    coerce_value(row.get(col, ""), dtype, null_markers)
-                    for col, dtype in schema.items()
-                )
-                batch.append(record)
-                total += 1
+            record: list = []
+            for cell, col_type in zip(padded, types):
+                stripped = cell.strip()
+                if not stripped or stripped in null_markers:
+                    record.append(None)
+                else:
+                    try:
+                        record.append(coerce(stripped, col_type))
+                    except (ValueError, OverflowError):
+                        record.append(stripped)  # fall back to raw string
 
-                if len(batch) >= batch_size:
-                    con.executemany(insert_sql, batch)
-                    con.commit()
-                    batch.clear()
-                    print(f"\r  {total:,} rows inserted…", end="", file=sys.stderr, flush=True)
+            batch.append(tuple(record))
+
+            if len(batch) >= BATCH_SIZE:
+                with conn:
+                    conn.executemany(insert_sql, batch)
+                total_rows += len(batch)
+                batch = []
+                _progress(total_rows, csv_path)
 
         if batch:
-            con.executemany(insert_sql, batch)
-            con.commit()
-            print(f"\r  {total:,} rows inserted…", end="", file=sys.stderr, flush=True)
+            with conn:
+                conn.executemany(insert_sql, batch)
+            total_rows += len(batch)
+            _progress(total_rows, csv_path, final=True)
 
-    finally:
-        con.close()
-
-    return total
+    return total_rows
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+def _progress(rows: int, csv_path: Path, *, final: bool = False) -> None:
+    end = "\n" if final else "\r"
+    print(f"  {rows:,} rows inserted from {csv_path.name}", end=end, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="csv2db",
-        description="Stream a CSV file into a SQLite database with column type inference.",
+        description="Stream a CSV file into a SQLite database with type inference.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  csv2db.py data.csv --db store.db --table sales
+  csv2db.py data.csv --db store.db --table sales --dry-run
+  csv2db.py data.csv --db store.db --table sales --null "" "NA" "N/A" "null"
+  csv2db.py data.csv --db store.db --table sales --delimiter ";"
+""",
     )
-    p.add_argument("csv", metavar="CSV_FILE", type=Path, help="Path to the input CSV file.")
-    p.add_argument("--db", metavar="DB_FILE", type=Path, required=True, help="Path to the SQLite database file.")
-    p.add_argument("--table", metavar="TABLE", required=True, help="Destination table name.")
+    p.add_argument("csv", metavar="CSV", type=Path, help="Input CSV file.")
+    p.add_argument(
+        "--db",
+        required=True,
+        metavar="DB",
+        type=Path,
+        help="SQLite database file (created if absent).",
+    )
+    p.add_argument(
+        "--table",
+        required=True,
+        metavar="TABLE",
+        help="Destination table name (created if absent).",
+    )
     p.add_argument(
         "--null",
+        nargs="*",
+        default=["", "NULL", "null", "NA", "N/A", "n/a", "nan", "NaN", "none", "None"],
         metavar="MARKER",
-        nargs="+",
-        default=["", "NULL", "N/A", "NA", "null", "n/a", "na", "none", "None"],
-        help="String values to treat as SQL NULL (default: empty string and common null tokens).",
+        help=(
+            "One or more cell values to treat as SQL NULL. "
+            'Default: empty string plus "NULL", "NA", "N/A", etc.'
+        ),
     )
     p.add_argument(
-        "--batch-size",
-        metavar="N",
-        type=int,
-        default=500,
-        help="Rows per INSERT transaction (default: 500).",
+        "--delimiter",
+        default=",",
+        metavar="CHAR",
+        help="CSV field delimiter (default: comma).",
     )
     p.add_argument(
-        "--sample-rows",
-        metavar="N",
-        type=int,
-        default=500,
-        help="Rows to sample for type inference (default: 500).",
+        "--encoding",
+        default="utf-8-sig",  # handles BOM from Excel exports transparently
+        metavar="ENC",
+        help='File encoding (default: "utf-8-sig").',
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the inferred CREATE TABLE statement and exit without writing anything.",
+        help="Infer schema and print the CREATE TABLE statement; do not write.",
     )
     return p
 
 
-def main() -> int:
+def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
     csv_path: Path = args.csv
-    db_path: Path = args.db
-    table: str = args.table
+    if not csv_path.exists():
+        print(f"error: file not found: {csv_path}", file=sys.stderr)
+        sys.exit(1)
+
     null_markers: set[str] = set(args.null)
 
-    if not csv_path.exists():
-        print(f"error: CSV file not found: {csv_path}", file=sys.stderr)
-        return 1
+    # ---- Schema inference ------------------------------------------------
+    print(f"Inferring schema from up to {SAMPLE_ROWS} rows …", file=sys.stderr)
+    columns, types = infer_schema(csv_path, null_markers, args.delimiter, args.encoding)
 
-    # ── Derive schema ──────────────────────────────────────────────────────────
-    print(f"Sampling up to {args.sample_rows:,} rows for type inference…", file=sys.stderr)
-    try:
-        schema = derive_schema(csv_path, table, null_markers, sample_rows=args.sample_rows)
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    create_sql = build_create_sql(table, schema)
+    ddl = build_create_table(args.table, columns, types)
 
     if args.dry_run:
-        print("\n── Inferred schema ───────────────────────────────────────")
-        print(create_sql)
-        print("──────────────────────────────────────────────────────────")
-        print("\nDry run complete. No data written.")
-        return 0
-
-    # ── Import ─────────────────────────────────────────────────────────────────
-    print(f"Importing into {db_path} → table '{table}'…", file=sys.stderr)
-    try:
-        total = stream_csv_to_db(
-            csv_path=csv_path,
-            db_path=db_path,
-            table=table,
-            schema=schema,
-            null_markers=null_markers,
-            batch_size=args.batch_size,
+        print("\n-- Inferred schema (dry run) --\n")
+        print(ddl)
+        print(
+            f"\n-- {len(columns)} column(s) detected",
+            file=sys.stdout,
         )
-    except Exception as exc:
-        print(f"\nerror: {exc}", file=sys.stderr)
-        return 1
+        col_width = max(len(c) for c in columns)
+        for col, typ in zip(columns, types):
+            print(f"  {col:<{col_width}}  {typ}")
+        return
 
-    print(f"\nDone. {total:,} rows inserted into '{table}'.", file=sys.stderr)
-    return 0
+    # ---- Connect and create table ----------------------------------------
+    conn = sqlite3.connect(args.db)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+
+    try:
+        with conn:
+            conn.execute(ddl)
+    except sqlite3.Error as exc:
+        print(f"error: could not create table: {exc}", file=sys.stderr)
+        conn.close()
+        sys.exit(1)
+
+    print(f"Table {args.table!r} ready in {args.db}.", file=sys.stderr)
+
+    # ---- Stream rows -----------------------------------------------------
+    try:
+        total = stream_insert(
+            conn,
+            args.table,
+            csv_path,
+            columns,
+            types,
+            null_markers,
+            args.delimiter,
+            args.encoding,
+        )
+    except sqlite3.Error as exc:
+        print(f"\nerror during insert: {exc}", file=sys.stderr)
+        conn.close()
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    print(f"Done. {total:,} rows loaded into {args.db}::{args.table}.", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

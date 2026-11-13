@@ -1,0 +1,21 @@
+{
+ "id": "glsl-phong",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 330 core. phong.vert and phong.frag: per-fragment Phong lighting with one directional light and one point light, normal matrix uniform, ambient/diffuse/specular terms, specular exponent and attenuation uniforms, gamma-correct output. write the two files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: phong.frag",
+ "stop": "tool_use",
+ "out_tokens": 221,
+ "files": {
+  "phong.vert": "#version 330 core\n\nlayout(location = 0) in vec3 aPosition;\nlayout(location = 1) in vec3 aNormal;\nlayout(location = 2) in vec2 aTexCoord;\n\nuniform mat4 uModel;\nuniform mat4 uView;\nuniform mat4 uProjection;\nuniform mat3 uNormalMatrix; // transpose(inverse(mat3(uModel)))\n\nout vec3 vFragPos;   // world-space position\nout vec3 vNormal;    // world-space normal (not yet normalised)\nout vec2 vTexCoord;\n\nvoid main()\n{\n    vec4 worldPos   = uModel * vec4(aPosition, 1.0);\n    vFragPos        = worldPos.xyz;\n    vNormal         = uNormalMatrix * aNormal;\n    vTexCoord       = aTexCoord;\n    gl_Position     = uProjection * uView * worldPos;\n}\n"
+ },
+ "prose": "",
+ "secs": 6.3
+}

@@ -1,108 +1,61 @@
 /*
  * binfmt.c — little-endian binary container parser (C11)
  *
- * Header layout (all fields little-endian, 16 bytes total):
- *   u32  magic        must be 0x4C425931 ("LBY1")
+ * Header layout (all fields little-endian):
+ *   u32  magic       0x4C425931 ("LBY1")
  *   u16  version
  *   u16  flags
  *   u32  record_count
- *   u32  record_size   validated against the fixed record stride (12)
+ *   u32  record_size  (bytes per record; must be >= 12)
  *
- * Record layout (12 bytes each):
+ * Record layout (all fields little-endian):
  *   u32  id
- *   u32  offset        absolute byte offset into the file
- *   u32  length        byte length of the referenced region
+ *   u32  offset
+ *   u32  length
  *
- * Exit codes:
- *   0   clean
- *   1   I/O or usage error
- *   2   structural corruption (bad magic / version / bounds)
+ * Returns 0 on success, non-zero on any corruption or I/O error.
  */
 
-#include <inttypes.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-/* -------------------------------------------------------------------------
- * Constants
- * ---------------------------------------------------------------------- */
-
-#define MAGIC            UINT32_C(0x4C425931)
-#define EXPECTED_VERSION UINT16_C(1)
-#define HEADER_BYTES     16u   /* 4 + 2 + 2 + 4 + 4                       */
-#define RECORD_BYTES     12u   /* 4 + 4 + 4                                */
-
-/* -------------------------------------------------------------------------
- * Endian-safe read helpers
- *
- * Read bytes individually and reconstruct in little-endian order.
- * Correct on both little- and big-endian hosts; no UB from aliasing.
- * ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
+/* Endian-safe read helpers (no alignment assumptions)                 */
+/* ------------------------------------------------------------------ */
 
 static uint16_t read_u16le(const uint8_t *p)
 {
-    return (uint16_t)((uint32_t)p[0]
-                    | ((uint32_t)p[1] << 8));
+    return (uint16_t)( (uint32_t)p[0]
+                     | (uint32_t)p[1] << 8 );
 }
 
 static uint32_t read_u32le(const uint8_t *p)
 {
     return (uint32_t)p[0]
-         | ((uint32_t)p[1] <<  8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
+         | (uint32_t)p[1] << 8
+         | (uint32_t)p[2] << 16
+         | (uint32_t)p[3] << 24;
 }
 
-/* -------------------------------------------------------------------------
- * File I/O
- * ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
 
-static uint8_t *slurp_file(const char *path, size_t *out_size)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        perror(path);
-        return NULL;
-    }
+#define MAGIC          UINT32_C(0x4C425931)
+#define SUPPORTED_VER  UINT16_C(1)
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        perror("fseek");
-        fclose(f);
-        return NULL;
-    }
+/* Fixed header size in bytes */
+#define HEADER_SIZE    16u   /* 4 + 2 + 2 + 4 + 4 */
 
-    long len = ftell(f);
-    if (len < 0) {
-        perror("ftell");
-        fclose(f);
-        return NULL;
-    }
-    rewind(f);
+/* Minimum record size (id + offset + length = 3 × u32) */
+#define RECORD_MIN     12u
 
-    /* Allocate at least 1 byte so malloc(0) edge case is not hit. */
-    uint8_t *buf = malloc(len > 0 ? (size_t)len : 1);
-    if (!buf) {
-        fputs("error: out of memory\n", stderr);
-        fclose(f);
-        return NULL;
-    }
-
-    if ((size_t)len > 0 && fread(buf, 1, (size_t)len, f) != (size_t)len) {
-        fprintf(stderr, "%s: short read\n", path);
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-
-    fclose(f);
-    *out_size = (size_t)len;
-    return buf;
-}
-
-/* -------------------------------------------------------------------------
- * Parsed types
- * ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
 typedef struct {
     uint32_t magic;
@@ -110,146 +63,124 @@ typedef struct {
     uint16_t flags;
     uint32_t record_count;
     uint32_t record_size;
-} Header;
+} BinfmtHeader;
 
 typedef struct {
     uint32_t id;
     uint32_t offset;
     uint32_t length;
-} Record;
+} BinfmtRecord;
 
-/* -------------------------------------------------------------------------
- * Header validation
- *
- * Returns 0 on success, -1 with a message on any structural error.
- * ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
+/* File helpers                                                        */
+/* ------------------------------------------------------------------ */
 
-static int parse_header(const uint8_t *buf, size_t file_size, Header *hdr)
+/* Returns the file size in bytes, or -1 on error. */
+static long file_size(FILE *fp)
 {
-    if (file_size < HEADER_BYTES) {
-        fprintf(stderr,
-                "error: file is %zu byte(s), need at least %u for the header\n",
-                file_size, HEADER_BYTES);
+    if (fseek(fp, 0, SEEK_END) != 0)
         return -1;
-    }
+    long sz = ftell(fp);
+    if (fseek(fp, 0, SEEK_SET) != 0)
+        return -1;
+    return sz;
+}
 
+/* Read exactly n bytes into buf; returns 0 on success, -1 on short read/error. */
+static int read_exact(FILE *fp, void *buf, size_t n)
+{
+    if (n == 0)
+        return 0;
+    if (fread(buf, 1, n, fp) != n)
+        return -1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Parsing                                                             */
+/* ------------------------------------------------------------------ */
+
+static int parse_header(const uint8_t *buf, BinfmtHeader *hdr)
+{
     hdr->magic        = read_u32le(buf +  0);
     hdr->version      = read_u16le(buf +  4);
     hdr->flags        = read_u16le(buf +  6);
     hdr->record_count = read_u32le(buf +  8);
     hdr->record_size  = read_u32le(buf + 12);
+    return 0;
+}
 
+static void parse_record(const uint8_t *buf, BinfmtRecord *rec)
+{
+    rec->id     = read_u32le(buf + 0);
+    rec->offset = read_u32le(buf + 4);
+    rec->length = read_u32le(buf + 8);
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation                                                          */
+/* ------------------------------------------------------------------ */
+
+static int validate_header(const BinfmtHeader *hdr, long fsize)
+{
     if (hdr->magic != MAGIC) {
-        fprintf(stderr, "error: bad magic 0x%08" PRIX32
-                        " (expected 0x%08" PRIX32 ")\n",
+        fprintf(stderr, "error: bad magic 0x%08X (expected 0x%08X)\n",
                 hdr->magic, MAGIC);
         return -1;
     }
 
-    if (hdr->version != EXPECTED_VERSION) {
-        fprintf(stderr, "error: version %" PRIu16
-                        " is not supported (expected %" PRIu16 ")\n",
-                hdr->version, EXPECTED_VERSION);
+    if (hdr->version != SUPPORTED_VER) {
+        fprintf(stderr, "error: unsupported version %u\n", hdr->version);
         return -1;
     }
 
-    /* The header declares a record_size; it must match our fixed stride. */
-    if (hdr->record_size != RECORD_BYTES) {
-        fprintf(stderr,
-                "error: header record_size %" PRIu32
-                " does not match expected %u\n",
-                hdr->record_size, RECORD_BYTES);
+    if (hdr->record_size < RECORD_MIN) {
+        fprintf(stderr, "error: record_size %u is too small (minimum %u)\n",
+                hdr->record_size, RECORD_MIN);
         return -1;
     }
 
-    /* Guard against overflow before the multiplication. */
-    if (hdr->record_count > (SIZE_MAX - HEADER_BYTES) / RECORD_BYTES) {
+    /* Total file must be at least header + all record descriptors */
+    uint64_t required = (uint64_t)HEADER_SIZE
+                      + (uint64_t)hdr->record_count * hdr->record_size;
+    if ((uint64_t)fsize < required) {
         fprintf(stderr,
-                "error: record_count %" PRIu32 " would overflow size_t\n",
-                hdr->record_count);
-        return -1;
-    }
-
-    size_t required = HEADER_BYTES + (size_t)hdr->record_count * RECORD_BYTES;
-    if (file_size < required) {
-        fprintf(stderr,
-                "error: file is %zu byte(s) but %" PRIu32 " record(s) require %zu\n",
-                file_size, hdr->record_count, required);
+                "error: file too small: have %ld bytes, need at least %llu "
+                "for %u records of %u bytes each\n",
+                fsize,
+                (unsigned long long)required,
+                hdr->record_count,
+                hdr->record_size);
         return -1;
     }
 
     return 0;
 }
 
-/* -------------------------------------------------------------------------
- * Record helpers
- * ---------------------------------------------------------------------- */
-
-static void parse_record(const uint8_t *p, Record *rec)
-{
-    rec->id     = read_u32le(p + 0);
-    rec->offset = read_u32le(p + 4);
-    rec->length = read_u32le(p + 8);
-}
-
 /*
- * Check that [offset, offset+length) fits inside the file.
- * Both fields are u32; promote to u64 to catch the wrap-around case where
- * offset + length would overflow a 32-bit value.
+ * Validate that each record's data region [offset, offset+length) lies
+ * within the file. Offset 0 is relative to the start of the file; it is
+ * the caller's responsibility to decide whether record data may overlap
+ * the header — we only check that it doesn't exceed the file boundary.
  */
-static int record_in_bounds(const Record *rec, size_t file_size)
+static int validate_record(const BinfmtRecord *rec, uint32_t idx, long fsize)
 {
     uint64_t end = (uint64_t)rec->offset + (uint64_t)rec->length;
-    return end <= (uint64_t)file_size;
-}
-
-/* -------------------------------------------------------------------------
- * Table printer
- * ---------------------------------------------------------------------- */
-
-static void print_divider(void)
-{
-    puts("-------  ----------  ----------  ----------");
-}
-
-static void print_records(const uint8_t *buf,
-                          const Header   *hdr,
-                          size_t          file_size,
-                          int            *out_corrupt)
-{
-    printf("%-7s  %-10s  %-10s  %-10s\n",
-           "index", "id", "offset", "length");
-    print_divider();
-
-    for (uint32_t i = 0; i < hdr->record_count; i++) {
-        const uint8_t *p = buf + HEADER_BYTES + (size_t)i * RECORD_BYTES;
-        Record rec;
-        parse_record(p, &rec);
-
-        const char *flag = "";
-        if (!record_in_bounds(&rec, file_size)) {
-            fprintf(stderr,
-                    "error: record %" PRIu32 ": offset 0x%08" PRIX32
-                    " + length 0x%08" PRIX32 " = 0x%016" PRIX64
-                    " exceeds file size %zu\n",
-                    i, rec.offset, rec.length,
-                    (uint64_t)rec.offset + rec.length,
-                    file_size);
-            *out_corrupt = 1;
-            flag = " [OOB]";
-        }
-
-        printf("%-7" PRIu32 "  0x%08" PRIX32 "  0x%08" PRIX32
-               "  0x%08" PRIX32 "%s\n",
-               i, rec.id, rec.offset, rec.length, flag);
+    if (end > (uint64_t)fsize) {
+        fprintf(stderr,
+                "error: record %u (id=0x%08X) data region [%u, %llu) "
+                "exceeds file size %ld\n",
+                idx, rec->id,
+                rec->offset, (unsigned long long)end,
+                fsize);
+        return -1;
     }
-
-    print_divider();
+    return 0;
 }
 
-/* -------------------------------------------------------------------------
- * Entry point
- * ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------------ */
+/* Entry point                                                         */
+/* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[])
 {
@@ -258,28 +189,97 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    size_t file_size = 0;
-    uint8_t *buf = slurp_file(argv[1], &file_size);
-    if (!buf) return 1;
-
-    Header hdr;
-    if (parse_header(buf, file_size, &hdr) != 0) {
-        free(buf);
-        return 2;
+    const char *path = argv[1];
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "error: cannot open '%s': %s\n", path, strerror(errno));
+        return 1;
     }
 
-    /* Summary block */
-    printf("file:         %s (%zu bytes)\n", argv[1], file_size);
-    printf("magic:        0x%08" PRIX32 "  (\"%.4s\")\n",
-           hdr.magic, (const char *)buf);  /* print ASCII form of magic */
-    printf("version:      %" PRIu16 "\n",   hdr.version);
-    printf("flags:        0x%04" PRIX16 "\n", hdr.flags);
-    printf("record_count: %" PRIu32 "\n",   hdr.record_count);
-    printf("record_size:  %" PRIu32 " bytes\n\n", hdr.record_size);
+    /* Determine file size */
+    long fsize = file_size(fp);
+    if (fsize < 0) {
+        fprintf(stderr, "error: cannot determine file size of '%s': %s\n",
+                path, strerror(errno));
+        fclose(fp);
+        return 1;
+    }
+
+    if ((long)fsize < (long)HEADER_SIZE) {
+        fprintf(stderr, "error: file too small to contain a valid header "
+                        "(%ld bytes, need %u)\n", fsize, HEADER_SIZE);
+        fclose(fp);
+        return 1;
+    }
+
+    /* Read and parse header */
+    uint8_t hbuf[HEADER_SIZE];
+    if (read_exact(fp, hbuf, HEADER_SIZE) != 0) {
+        fprintf(stderr, "error: failed to read header: %s\n", strerror(errno));
+        fclose(fp);
+        return 1;
+    }
+
+    BinfmtHeader hdr;
+    parse_header(hbuf, &hdr);
+
+    if (validate_header(&hdr, fsize) != 0) {
+        fclose(fp);
+        return 1;
+    }
+
+    /* Print header summary */
+    printf("File   : %s\n", path);
+    printf("Magic  : 0x%08X\n", hdr.magic);
+    printf("Version: %u\n",     hdr.version);
+    printf("Flags  : 0x%04X\n", hdr.flags);
+    printf("Records: %u  (record_size=%u)\n\n", hdr.record_count, hdr.record_size);
+
+    /* Column widths are fixed for alignment */
+    printf("%-10s  %-12s  %-12s  %-12s\n",
+           "Index", "ID", "Offset", "Length");
+    printf("%-10s  %-12s  %-12s  %-12s\n",
+           "----------", "------------", "------------", "------------");
+
+    /* Allocate a buffer for one record row (record_size may exceed 12 bytes) */
+    uint8_t *rbuf = malloc(hdr.record_size);
+    if (!rbuf) {
+        fprintf(stderr, "error: out of memory\n");
+        fclose(fp);
+        return 1;
+    }
 
     int corrupt = 0;
-    print_records(buf, &hdr, file_size, &corrupt);
 
-    free(buf);
-    return corrupt ? 2 : 0;
+    for (uint32_t i = 0; i < hdr.record_count; i++) {
+        if (read_exact(fp, rbuf, hdr.record_size) != 0) {
+            fprintf(stderr, "error: short read at record %u\n", i);
+            corrupt = 1;
+            break;
+        }
+
+        BinfmtRecord rec;
+        parse_record(rbuf, &rec);
+
+        if (validate_record(&rec, i, fsize) != 0) {
+            corrupt = 1;
+            /* continue printing remaining records for diagnostics */
+        }
+
+        printf("%-10u  0x%08X    %-12u  %-12u%s\n",
+               i, rec.id, rec.offset, rec.length,
+               (validate_record(&rec, i, fsize) != 0) ? "  [CORRUPT]" : "");
+    }
+
+    free(rbuf);
+    fclose(fp);
+
+    if (corrupt) {
+        fprintf(stderr, "\ncorruption detected — file is not valid\n");
+        return 1;
+    }
+
+    printf("\nOK — %u record%s validated\n",
+           hdr.record_count, hdr.record_count == 1 ? "" : "s");
+    return 0;
 }

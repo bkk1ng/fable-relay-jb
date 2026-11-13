@@ -1,0 +1,22 @@
+{
+ "id": "glsl-compute",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "end_turn",
+ "out_tokens": 914,
+ "files": {
+  "reduce.comp": "#version 450\n\n// Parallel reduction: sum of a float array using shared memory tree reduction.\n// Each workgroup reduces LOCAL_SIZE elements into one partial sum, written to\n// partialSums[gl_WorkGroupID.x]. A second dispatch (or CPU readback) folds\n// the partial sums to the final result.\n\nlayout(local_size_x = 256) in;\n\n// Input buffer \u2014 may be any length, including non-multiples of 256.\nlayout(std430, binding = 0) readonly buffer InputBuffer {\n    float data[];\n};\n\n// One float per workgroup; caller allocates ceil(elementCount / 256) entries.\nlayout(std430, binding = 1) writeonly buffer OutputBuffer {\n    float partialSums[];\n};\n\n// Push constant carries the true element count so out-of-bounds lanes zero out.\nlayout(push_constant) uniform PushConstants {\n    uint elementCount;\n};\n\n// Shared memory tile: one slot per lane in the workgroup.\nshared float tile[256];\n\nvoid main() {\n    uint gid    = gl_GlobalInvocationID.x;   // global element index\n    uint lid    = gl_LocalInvocationID.x;    // lane within workgroup\n    uint wgid   = gl_WorkGroupID.x;          // which workgroup this is\n\n    // Load \u2014 lanes beyond the array end contribute 0 (additive identity).\n    tile[lid] = (gid < elementCount) ? data[gid] : 0.0;\n\n    // Wait until every lane in the workgroup has written its value.\n    barrier();\n    memoryBarrierShared();\n\n    // Tree reduction: each step halves the active lane count.\n    // stride = 128, 64, 32, 16, 8, 4, 2, 1\n    for (uint stride = 128u; stride >= 1u; stride >>= 1u) {\n        if (lid < stride) {\n            tile[lid] += tile[lid + stride];\n        }\n        // Synchronise before the next level so every write is visible.\n        barrier();\n        memoryBarrierShared();\n    }\n\n    // Lane 0 holds the workgroup sum; write it to the output buffer.\n    if (lid == 0u) {\n        partialSums[wgid] = tile[0];\n    }\n}\n"
+ },
+ "prose": "The file wrote successfully. `reduce.comp` is a complete, ready-to-compile GLSL 450 compute shader.\n\nA few things worth noting about the design:\n\n**Non-multiple sizes** \u2014 the guard `gid < elementCount` on the load zero-fills any lane whose global index falls past the end of the array, so the reduction math stays clean regardless of input length.\n\n**Tree reduction** \u2014 stride starts at 128 (half of 256) and halves each iteration. Each level has a `barrier()` + `memoryBarrierShared()` pair, which is the minimum needed to guarantee visibility before the next read.\n\n**Push constant** \u2014 passing `elementCount` as a push constant is the cheapest path; it avoids a buffer read and keeps the descriptor set simple.\n\n**Two-pass pattern** \u2014 this shader produces one partial sum per workgroup. You dispatch it with `ceil(N / 256)` workgroups, then either fold the partial sums on the CPU or run a second dispatch of the same shader over the output buffer (which is at most a few thousand floats, so one more workgroup finishes the job).\n\nIf you want specialisation constants for `local_size_x` instead of a hard-coded 256, or a single-pass path using subgroup ops (`subgroupAdd` + one elected lane writes the workgroup sum), let me know.",
+ "rounds": 2,
+ "secs": 21.1
+}

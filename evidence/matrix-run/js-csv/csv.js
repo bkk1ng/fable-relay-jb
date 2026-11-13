@@ -1,379 +1,262 @@
 'use strict';
 
 /**
- * csv.js — streaming CSV parser for Node.js (CommonJS).
+ * csv.js — streaming CSV parser for Node 22 (CommonJS, no dependencies)
  *
- * Handles quoted fields, escaped quotes (""), embedded newlines, CRLF/LF/CR line endings,
- * and a configurable field delimiter. Exposes:
- *   - CsvParser: a Transform stream that emits one row at a time (string[]).
- *   - parseAll(input, options): convenience that parses a full string/Buffer and returns string[][].
+ * Features:
+ *   - RFC 4180-style quoted fields
+ *   - Escaped quotes ("")
+ *   - Embedded newlines inside quoted fields
+ *   - CRLF and LF line endings
+ *   - Configurable delimiter (default: ',')
  *
- * No external dependencies. Node >= 12 (uses stream.Transform, Buffer).
+ * Exports:
+ *   CsvParser  — Transform stream, emits one string[] per row
+ *   parseAll   — convenience: string → string[][]
  */
 
-const { Transform } = require('stream');
+const { Transform } = require('node:stream');
+const { Readable } = require('node:stream');
+
+// ---------------------------------------------------------------------------
+// Parser state machine
+// ---------------------------------------------------------------------------
+
+const S_FIELD_START  = 0; // beginning of a new field
+const S_UNQUOTED     = 1; // inside an unquoted field
+const S_QUOTED       = 2; // inside a quoted field
+const S_QUOTE_SEEN   = 3; // just saw a closing/escape quote inside quoted field
 
 /**
- * Transform stream that parses CSV data incrementally.
+ * Low-level incremental CSV parser.
+ * Feed chunks with push(chunk), collect rows via onRow(fields[]).
  *
- * Options:
- *   - delimiter (string, default ","): single-character field delimiter.
- *   - quote (string, default '"'): quote character wrapping fields that contain
- *     delimiters, newlines, or the quote character itself. Inside a quoted field,
- *     two consecutive quote characters are treated as a literal quote.
- *   - objectMode (boolean, default true): when true, pushes string[] rows directly;
- *     when false, pushes each row as a JSON-encoded line (string).
- *   - emitHeader (boolean, default false): if true, the first emitted row is also
- *     accessible via the `header` property after it has been parsed.
- *
- * Events:
- *   - 'data' (row): string[] of field values for one row.
- *   - 'end': all rows emitted.
- *
- * Properties:
- *   - header: string[] | null — the first parsed row (when emitHeader is true), else null.
+ * @param {object}   opts
+ * @param {string}   [opts.delimiter=',']  Single-character field delimiter.
+ * @param {function} opts.onRow            Called with string[] for each complete row.
  */
-class CsvParser extends Transform {
-  constructor(options = {}) {
-    const {
-      delimiter = ',',
-      quote = '"',
-      objectMode = true,
-      emitHeader = false,
-      ...transformOpts
-    } = options;
-
-    if (typeof delimiter !== 'string' || delimiter.length !== 1) {
-      throw new TypeError('delimiter must be a single character string');
+class IncrementalCsvParser {
+  constructor({ delimiter = ',', onRow }) {
+    if (delimiter.length !== 1) {
+      throw new RangeError('delimiter must be exactly one character');
     }
-    if (typeof quote !== 'string' || quote.length !== 1) {
-      throw new TypeError('quote must be a single character string');
-    }
-    if (delimiter === quote) {
-      throw new TypeError('delimiter and quote must be different characters');
-    }
-
-    super({ ...transformOpts, objectMode });
-
-    this.delimiter = delimiter;
-    this.quote = quote;
-    this.emitHeader = emitHeader;
-
-    // Parsing state machine.
-    // state: 'field-start' | 'in-unquoted' | 'in-quoted' | 'quote-in-quoted' | 'after-quoted'
-    this.buffer = '';        // undecoded text pending parse
-    this.row = [];           // fields of the current row being built
-    this.field = '';         // current field text being accumulated
-    this.state = 'field-start';
-    this.header = null;
-    this._rowIndex = 0;
+    this._delim  = delimiter;
+    this._onRow  = onRow;
+    this._state  = S_FIELD_START;
+    this._field  = '';   // accumulator for current field
+    this._fields = [];   // accumulator for current row
+    this._prevCR = false; // tracks a pending \r
   }
 
   /**
-   * Push a complete row. When emitHeader is set, the first row becomes this.header.
-   * @param {string[]} row
-   * @private
+   * Push a string chunk into the parser.
+   * @param {string} chunk
    */
-  _pushRow(row) {
-    if (this.emitHeader && this._rowIndex === 0) {
-      this.header = row;
-    }
-    this._rowIndex++;
-    if (this.objectMode) {
-      this.push(row);
-    } else {
-      this.push(JSON.stringify(row) + '\n');
-    }
-  }
+  push(chunk) {
+    const delim = this._delim;
 
-  /**
-   * Consume as many complete fields/rows as are present in this.buffer.
-   * Leaves any trailing partial field in this.buffer for the next chunk.
-   * @private
-   */
-  _consume() {
-    let i = 0;
-    const len = this.buffer.length;
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i];
 
-    while (i < len) {
-      const ch = this.buffer[i];
+      // Absorb the LF half of a CRLF we already handled via \r
+      if (this._prevCR && ch === '\n') {
+        this._prevCR = false;
+        continue;
+      }
+      this._prevCR = false;
 
-      switch (this.state) {
-        case 'field-start': {
-          // Beginning of a new field. A quote here means a quoted field.
-          if (ch === this.quote) {
-            this.state = 'in-quoted';
-            i++;
-          } else if (ch === this.delimiter) {
-            // Empty unquoted field, immediately followed by a delimiter.
-            this.row.push(this.field);
-            this.field = '';
-            i++;
-          } else if (ch === '\r') {
-            // Possible CRLF; peek ahead. Treat lone CR as a row terminator too.
-            if (this.buffer[i + 1] === '\n') {
-              this.row.push(this.field);
-              this.field = '';
-              this.row = [];
-              i += 2;
-            } else {
-              this.row.push(this.field);
-              this.field = '';
-              this.row = [];
-              i++;
-            }
-          } else if (ch === '\n') {
-            this.row.push(this.field);
-            this.field = '';
-            this.row = [];
-            i++;
+      switch (this._state) {
+        case S_FIELD_START:
+          if (ch === '"') {
+            this._state = S_QUOTED;
+          } else if (ch === delim) {
+            // empty unquoted field
+            this._fields.push('');
+          } else if (ch === '\r' || ch === '\n') {
+            if (ch === '\r') this._prevCR = true;
+            this._endRow();
           } else {
-            this.field += ch;
-            this.state = 'in-unquoted';
-            i++;
+            this._field += ch;
+            this._state  = S_UNQUOTED;
           }
           break;
-        }
 
-        case 'in-unquoted': {
-          // Reading an unquoted field until delimiter or newline.
-          if (ch === this.delimiter) {
-            this.row.push(this.field);
-            this.field = '';
-            this.state = 'field-start';
-            i++;
-          } else if (ch === '\r') {
-            if (this.buffer[i + 1] === '\n') {
-              this.row.push(this.field);
-              this.field = '';
-              this._pushRow(this.row);
-              this.row = [];
-              this.state = 'field-start';
-              i += 2;
-            } else {
-              this.row.push(this.field);
-              this.field = '';
-              this._pushRow(this.row);
-              this.row = [];
-              this.state = 'field-start';
-              i++;
-            }
-          } else if (ch === '\n') {
-            this.row.push(this.field);
-            this.field = '';
-            this._pushRow(this.row);
-            this.row = [];
-            this.state = 'field-start';
-            i++;
+        case S_UNQUOTED:
+          if (ch === delim) {
+            this._endField();
+          } else if (ch === '\r' || ch === '\n') {
+            if (ch === '\r') this._prevCR = true;
+            this._endField();
+            this._endRow();
           } else {
-            this.field += ch;
-            i++;
+            this._field += ch;
           }
           break;
-        }
 
-        case 'in-quoted': {
-          // Inside a quoted field. A quote is either an escape ("") or the closing quote.
-          if (ch === this.quote) {
-            if (this.buffer[i + 1] === this.quote) {
-              // Escaped quote: literal quote character.
-              this.field += this.quote;
-              i += 2;
-            } else {
-              // Closing quote.
-              this.state = 'after-quoted';
-              i++;
-            }
+        case S_QUOTED:
+          if (ch === '"') {
+            this._state = S_QUOTE_SEEN;
           } else {
-            this.field += ch;
-            i++;
+            this._field += ch;
           }
           break;
-        }
 
-        case 'after-quoted': {
-          // The closing quote has been read. We now expect a delimiter, newline, or EOF.
-          if (ch === this.delimiter) {
-            this.row.push(this.field);
-            this.field = '';
-            this.state = 'field-start';
-            i++;
-          } else if (ch === '\r') {
-            if (this.buffer[i + 1] === '\n') {
-              this.row.push(this.field);
-              this.field = '';
-              this._pushRow(this.row);
-              this.row = [];
-              this.state = 'field-start';
-              i += 2;
-            } else {
-              this.row.push(this.field);
-              this.field = '';
-              this._pushRow(this.row);
-              this.row = [];
-              this.state = 'field-start';
-              i++;
-            }
-          } else if (ch === '\n') {
-            this.row.push(this.field);
-            this.field = '';
-            this._pushRow(this.row);
-            this.row = [];
-            this.state = 'field-start';
-            i++;
+        case S_QUOTE_SEEN:
+          if (ch === '"') {
+            // escaped quote inside quoted field
+            this._field += '"';
+            this._state  = S_QUOTED;
+          } else if (ch === delim) {
+            this._endField();
+          } else if (ch === '\r' || ch === '\n') {
+            if (ch === '\r') this._prevCR = true;
+            this._endField();
+            this._endRow();
           } else {
-            // Stray characters after a closing quote. Per RFC 4180 this is malformed,
-            // but we tolerate it by appending to the field as if unquoted.
-            this.state = 'in-unquoted';
-            // Do not consume ch; let the in-unquoted case handle it next loop.
+            // Lenient: treat as end of quoted field, continue as unquoted
+            this._field += ch;
+            this._state  = S_UNQUOTED;
           }
-          break;
-        }
-
-        default:
-          i++;
           break;
       }
     }
-
-    // Retain the unprocessed tail. In 'in-quoted' we may have stopped mid-escape
-    // (a quote with no following char yet); the state will handle it next chunk.
-    this.buffer = this.buffer.slice(i);
   }
 
   /**
-   * Transform implementation: append chunk to buffer and consume complete tokens.
-   * @param {Buffer|string} chunk
-   * @param {string} encoding
-   * @param {Function} callback
-   * @private
+   * Signal end of input. Flushes any in-progress row.
    */
-  _transform(chunk, encoding, callback) {
-    if (Buffer.isBuffer(chunk)) {
-      this.buffer += chunk.toString('utf8');
-    } else {
-      this.buffer += chunk;
+  flush() {
+    // If there is any pending content, emit the final row.
+    if (this._fields.length > 0 || this._field !== '' || this._state !== S_FIELD_START) {
+      // End the current field regardless of quote state
+      this._endField();
+      this._endRow();
     }
+  }
+
+  _endField() {
+    this._fields.push(this._field);
+    this._field = '';
+    this._state = S_FIELD_START;
+  }
+
+  _endRow() {
+    // Skip completely empty rows (e.g. trailing newline)
+    if (this._fields.length > 0) {
+      this._onRow(this._fields);
+    }
+    this._fields = [];
+    this._state  = S_FIELD_START;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transform stream
+// ---------------------------------------------------------------------------
+
+/**
+ * A Transform stream that accepts Buffer/string chunks and emits one string[]
+ * per CSV row as an object-mode output.
+ *
+ * @example
+ * const parser = new CsvParser({ delimiter: ';' });
+ * parser.on('data', row => console.log(row));
+ * fs.createReadStream('data.csv').pipe(parser);
+ */
+class CsvParser extends Transform {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.delimiter=',']
+   * @param {BufferEncoding} [opts.encoding='utf8']  Input encoding when chunks are Buffers.
+   */
+  constructor(opts = {}) {
+    const { delimiter = ',', encoding = 'utf8', ...rest } = opts;
+    super({ ...rest, readableObjectMode: true });
+    this._encoding = encoding;
+    this._inner = new IncrementalCsvParser({
+      delimiter,
+      onRow: (fields) => this.push(fields),
+    });
+  }
+
+  _transform(chunk, encoding, callback) {
     try {
-      this._consume();
+      const str = Buffer.isBuffer(chunk) ? chunk.toString(this._encoding) : chunk;
+      this._inner.push(str);
       callback();
     } catch (err) {
       callback(err);
     }
   }
 
-  /**
-   * Flush any final partial row. Handles the case where the input does not end
-   * with a trailing newline, or where a quoted field was left open (we still emit
-   * what we have rather than dropping the last row).
-   * @param {Function} callback
-   * @private
-   */
   _flush(callback) {
-    // Finish any trailing field/row not terminated by a newline.
-    if (this.state === 'in-quoted') {
-      // Unterminated quoted field: emit the accumulated text as-is.
-      this.row.push(this.field);
-      this.field = '';
-      this._pushRow(this.row);
-      this.row = [];
-    } else if (this.state === 'after-quoted' || this.state === 'in-unquoted' || this.state === 'field-start') {
-      // A field (possibly empty) has been accumulated without a trailing delimiter/newline.
-      // Only emit if the row is non-empty OR the field is non-empty OR we already have fields.
-      // This avoids emitting a spurious empty row from a trailing newline.
-      if (this.field !== '' || this.row.length > 0) {
-        this.row.push(this.field);
-        this.field = '';
-        this._pushRow(this.row);
-        this.row = [];
-      }
+    try {
+      this._inner.flush();
+      callback();
+    } catch (err) {
+      callback(err);
     }
-    this.buffer = '';
-    callback();
   }
 }
 
+// ---------------------------------------------------------------------------
+// Convenience helper
+// ---------------------------------------------------------------------------
+
 /**
- * Convenience: parse an entire CSV string/Buffer synchronously and return all rows.
+ * Parse an entire CSV string synchronously (via stream internals).
  *
- * @param {string|Buffer} input
- * @param {Object} [options] — same options as CsvParser (objectMode is forced off here
- *   since we collect rows directly).
+ * @param {string}  input
+ * @param {object}  [opts]
+ * @param {string}  [opts.delimiter=',']
  * @returns {string[][]}
  */
-function parseAll(input, options = {}) {
-  const { delimiter, quote, emitHeader } = options;
-  const parser = new CsvParser({
-    delimiter,
-    quote,
-    emitHeader,
-    objectMode: true,
-    // readableObjectMode so push() accepts arrays.
-    readableObjectMode: true,
-    writableObjectMode: true,
-  });
-
+function parseAll(input, opts = {}) {
+  const { delimiter = ',' } = opts;
   const rows = [];
-  parser.on('data', (row) => rows.push(row));
-  parser.on('error', (err) => { throw err; });
-
-  // end() triggers _flush synchronously within the same tick of the event loop
-  // for a fresh Transform with no I/O scheduling, but to be safe we return after
-  // the 'end' event.
-  let ended = false;
-  parser.on('end', () => { ended = true; });
-
-  parser.write(input);
-  parser.end();
-
-  // For a non-IO-bound Transform, 'end' fires synchronously after end() returns.
-  // If for some reason it did not (unlikely), fall back to a sync drain.
-  if (!ended) {
-    // Defensive: this branch should not normally trigger for in-memory parsing.
-    // We drain by reading until null. In Node, a non-flowing Transform with no
-    // 'data' listener removal would need resume(); here rows already captured.
-    parser.resume();
-  }
-
+  const parser = new IncrementalCsvParser({
+    delimiter,
+    onRow: (fields) => rows.push(fields),
+  });
+  parser.push(input);
+  parser.flush();
   return rows;
 }
 
 // ---------------------------------------------------------------------------
-// Demo: read CSV from a string and print each row. Runs when invoked directly.
+// Demo
 // ---------------------------------------------------------------------------
-function demo() {
-  const csv = [
-    'name,role,quote',
-    'Alice,admin,"She said, ""hi"" and left"',
-    'Bob,"editor\nwriter","multi-line\nfield"',
-    'Carol,member,plain text\r\n',
-    'Dave,guest,"trailing quote"',
-  ].join('\n');
 
-  console.log('--- parseAll demo ---');
-  const rows = parseAll(csv, { emitHeader: true });
-  console.log('Header:', rows[0]);
-  for (let i = 1; i < rows.length; i++) {
-    console.log(`Row ${i}:`, rows[i]);
+function runDemo() {
+  const sample = [
+    'id,name,note',
+    '1,Alice,"loves ""quoting""  things"',
+    '2,Bob,"line one\r\nline two"',
+    '3,"Charlie, Jr.",no quotes here',
+    '4,Dana,',
+  ].join('\r\n');
+
+  console.log('=== parseAll demo ===');
+  const rows = parseAll(sample);
+  for (const row of rows) {
+    console.log(row);
   }
 
-  console.log('\n--- streaming demo ---');
-  const parser = new CsvParser({ emitHeader: true });
-  parser.on('data', (row) => console.log('stream row:', row));
-  parser.on('end', () => console.log('stream end. header =', parser.header));
-  parser.on('error', (err) => console.error('stream error:', err));
-
-  // Feed the same CSV in two chunks to demonstrate streaming.
-  const mid = Math.floor(csv.length / 2);
-  parser.write(csv.slice(0, mid));
-  parser.write(csv.slice(mid));
-  parser.end();
+  console.log('\n=== Transform stream demo ===');
+  const readable = Readable.from([sample]);
+  const parser   = new CsvParser();
+  readable.pipe(parser);
+  parser.on('data', (row) => console.log(row));
+  parser.on('end',  () => console.log('stream done'));
 }
 
-module.exports = CsvParser;
-module.exports.CsvParser = CsvParser;
-module.exports.parseAll = parseAll;
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
 
+module.exports = { CsvParser, parseAll };
+
+// Run demo when executed directly: `node csv.js`
 if (require.main === module) {
-  demo();
+  runDemo();
 }

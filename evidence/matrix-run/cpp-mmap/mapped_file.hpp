@@ -1,120 +1,161 @@
 #pragma once
 
-// RAII memory-mapped read-only file — C++17, POSIX (Linux)
-// Movable, non-copyable. Safe for empty files.
+// mapped_file.hpp — RAII memory-mapped file reader
+// C++17, POSIX (Linux). Uses open/fstat/mmap.
+// Movable, non-copyable. Handles empty files (no mapping is created).
+// Exposes a span of raw bytes and a typed view<T> with alignment + size checks.
 
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
+#include <cstddef>      // std::byte, std::size_t, std::uintptr_t
+#include <cstdint>       // std::uintptr_t (also via cstddef, kept for clarity)
+#include <stdexcept>     // std::runtime_error
+#include <string>        // std::string (error messages)
 
+// POSIX
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-class MappedFile {
+// ---------------------------------------------------------------------------
+// span — minimal C++17 stand-in for std::span (C++20)
+// ---------------------------------------------------------------------------
+template <typename T>
+class span {
 public:
-    // Open and map the file at `path`. Throws std::runtime_error on failure.
-    // Empty files are accepted; they produce a zero-length mapping.
-    explicit MappedFile(std::string_view path) {
-        std::string p(path);                       // need NUL-terminated copy
+    span() noexcept = default;
+    span(T* data, std::size_t size) noexcept : data_(data), size_(size) {}
 
-        fd_ = ::open(p.c_str(), O_RDONLY);
-        if (fd_ == -1)
-            throw std::runtime_error("MappedFile: open failed: " + p);
+    T*  data()  const noexcept { return data_; }
+    std::size_t size() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
 
-        struct stat st{};
-        if (::fstat(fd_, &st) == -1) {
-            ::close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("MappedFile: fstat failed: " + p);
-        }
+    T* begin() const noexcept { return data_; }
+    T* end()   const noexcept { return data_ + size_; }
 
-        size_ = static_cast<std::size_t>(st.st_size);
+    T& operator[](std::size_t i) const noexcept { return data_[i]; }
 
-        // mmap(2) with length 0 is EINVAL on Linux — skip for empty files.
-        if (size_ == 0)
-            return;
+private:
+    T*          data_ = nullptr;
+    std::size_t size_ = 0;
+};
 
-        addr_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-        if (addr_ == MAP_FAILED) {
-            addr_ = nullptr;
-            ::close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("MappedFile: mmap failed: " + p);
-        }
+// ---------------------------------------------------------------------------
+// mapped_file — RAII wrapper around open/fstat/mmap
+// ---------------------------------------------------------------------------
+class mapped_file {
+public:
+    mapped_file() = default;
+
+    explicit mapped_file(const char* path) {
+        open(path);
     }
 
-    ~MappedFile() { release(); }
+    explicit mapped_file(const std::string& path)
+        : mapped_file(path.c_str()) {}
 
-    // Non-copyable
-    MappedFile(const MappedFile&)            = delete;
-    MappedFile& operator=(const MappedFile&) = delete;
+    // non-copyable
+    mapped_file(const mapped_file&)            = delete;
+    mapped_file& operator=(const mapped_file&) = delete;
 
-    // Movable — leaves source in a valid, empty state
-    MappedFile(MappedFile&& o) noexcept
-        : addr_(o.addr_), size_(o.size_), fd_(o.fd_)
-    {
-        o.addr_ = nullptr;
-        o.size_ = 0;
-        o.fd_   = -1;
+    // movable
+    mapped_file(mapped_file&& other) noexcept
+        : data_(other.data_), size_(other.size_), fd_(other.fd_) {
+        other.data_ = nullptr;
+        other.size_ = 0;
+        other.fd_   = -1;
     }
 
-    MappedFile& operator=(MappedFile&& o) noexcept {
-        if (this != &o) {
-            release();
-            addr_ = o.addr_; size_ = o.size_; fd_ = o.fd_;
-            o.addr_ = nullptr; o.size_ = 0; o.fd_ = -1;
+    mapped_file& operator=(mapped_file&& other) noexcept {
+        if (this != &other) {
+            close();
+            data_ = other.data_;
+            size_ = other.size_;
+            fd_   = other.fd_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+            other.fd_   = -1;
         }
         return *this;
     }
 
-    // Raw byte view of the entire mapping.
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
-        return { static_cast<const std::byte*>(addr_), size_ };
+    ~mapped_file() {
+        close();
     }
 
-    [[nodiscard]] std::size_t size()  const noexcept { return size_; }
-    [[nodiscard]] bool        empty() const noexcept { return size_ == 0; }
+    // --- accessors ----------------------------------------------------------
 
-    // Reinterpret the mapping as a sequence of T.
-    //
-    // Requires:
-    //   - T is trivially copyable
-    //   - file size is an exact multiple of sizeof(T)
-    //   - mapping address is suitably aligned for T
-    //     (mmap address is page-aligned, so this only fails for over-aligned T)
-    //
-    // Returns an empty span for empty files without throwing.
+    /// Raw byte view of the entire mapping. Empty span for empty files.
+    span<const std::byte> bytes() const noexcept {
+        return {static_cast<const std::byte*>(data_), size_};
+    }
+
+    std::size_t   size()   const noexcept { return size_; }
+    const void*   data()   const noexcept { return data_; }
+    bool          is_open() const noexcept { return fd_ != -1; }
+
+    /// Typed view. Throws if the file size is not a whole multiple of sizeof(T)
+    /// or if the mapped address is not suitably aligned for T.
     template <typename T>
-    [[nodiscard]] std::span<const T> view() const {
-        static_assert(std::is_trivially_copyable_v<T>,
-                      "MappedFile::view<T>: T must be trivially copyable");
-
+    span<const T> view() const {
         if (size_ % sizeof(T) != 0)
             throw std::runtime_error(
-                "MappedFile::view<T>: file size is not a multiple of sizeof(T)");
-
-        if (addr_ != nullptr &&
-            reinterpret_cast<std::uintptr_t>(addr_) % alignof(T) != 0)
+                "mapped_file::view: file size is not a multiple of " +
+                std::to_string(sizeof(T)));
+        if (reinterpret_cast<std::uintptr_t>(data_) % alignof(T) != 0)
             throw std::runtime_error(
-                "MappedFile::view<T>: mapping address misaligned for T");
-
-        return { static_cast<const T*>(addr_), size_ / sizeof(T) };
+                "mapped_file::view: mapped address is not aligned for the requested type");
+        return {static_cast<const T*>(data_), size_ / sizeof(T)};
     }
 
 private:
-    void* addr_     = nullptr;
-    std::size_t size_ = 0;
-    int   fd_       = -1;
+    // --- internals ---------------------------------------------------------
 
-    void release() noexcept {
-        if (addr_ != nullptr) { ::munmap(addr_, size_); addr_ = nullptr; }
-        if (fd_   != -1)      { ::close(fd_);           fd_   = -1;     }
+    void open(const char* path) {
+        fd_ = ::open(path, O_RDONLY);
+        if (fd_ == -1)
+            throw std::runtime_error("mapped_file: open(\"" +
+                                      std::string(path) + "\") failed");
+
+        struct stat st;
+        if (fstat(fd_, &st) == -1) {
+            ::close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("mapped_file: fstat failed");
+        }
+
+        size_ = static_cast<std::size_t>(st.st_size);
+
+        // mmap with length 0 is invalid (returns MAP_FAILED, errno == EINVAL).
+        // An empty file is a valid state: keep fd open, data_ stays null.
+        if (size_ == 0) {
+            data_ = nullptr;
+            return;
+        }
+
+        void* ptr = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+        if (ptr == MAP_FAILED) {
+            ::close(fd_);
+            fd_   = -1;
+            size_ = 0;
+            throw std::runtime_error("mapped_file: mmap failed");
+        }
+
+        data_ = ptr;
+    }
+
+    void close() noexcept {
+        if (data_) {
+            munmap(data_, size_);
+            data_ = nullptr;
+        }
+        if (fd_ != -1) {
+            ::close(fd_);
+            fd_ = -1;
+        }
         size_ = 0;
     }
+
+    void*        data_ = nullptr;
+    std::size_t  size_ = 0;
+    int          fd_   = -1;
 };

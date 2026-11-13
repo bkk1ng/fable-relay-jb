@@ -1,20 +1,25 @@
-// manifest hashes every regular file under a directory tree and writes a
-// sorted, tab-delimited manifest (path, size, sha256) to stdout or --out.
-// Symlinks and .git directories are always skipped; --exclude accepts repeatable
-// glob patterns matched against base names and relative paths.
+// hashdir — walk a directory tree, hash every regular file, emit a sorted manifest.
 //
 // Usage:
 //
-//	manifest [options] [directory]
+//	hashdir [flags] [directory]
 //
-// Build:
+// Flags:
 //
-//	go mod init manifest && go build -o manifest main.go
+//	--out FILE        write manifest to FILE instead of stdout
+//	--jobs N          parallel workers (default: logical CPUs)
+//	--exclude GLOB    skip paths whose base name or root-relative path matches GLOB
+//	                  (repeatable; uses filepath.Match syntax)
+//
+// Manifest format (tab-separated, one file per line):
+//
+//	<path>\t<size-bytes>\t<sha256-hex>
+//
+// Summary is written to stderr.
 package main
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -28,217 +33,217 @@ import (
 	"time"
 )
 
-// multiFlag lets a single flag appear multiple times on the command line.
-type multiFlag []string
+// globList is a repeatable string flag (--exclude can appear multiple times).
+type globList []string
 
-func (m *multiFlag) String() string { return strings.Join(*m, ", ") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
-}
+func (g *globList) String() string        { return strings.Join(*g, ", ") }
+func (g *globList) Set(v string) error    { *g = append(*g, v); return nil }
 
-// entry holds the result of hashing one file.
 type entry struct {
-	path string // relative path from the scanned root
+	path string // path as returned by WalkDir
 	size int64
-	hash string // hex-encoded sha256
-	err  error  // set if the file could not be read
-}
-
-// isExcluded reports whether relPath matches any glob pattern. Each pattern is
-// tested against both the base name and the full relative path so that patterns
-// like "node_modules" or "*.tmp" work regardless of depth, while patterns like
-// "src/test/*" can target a specific subtree.
-func isExcluded(relPath string, patterns []string) bool {
-	base := filepath.Base(relPath)
-	for _, p := range patterns {
-		if matched, _ := filepath.Match(p, base); matched {
-			return true
-		}
-		if matched, _ := filepath.Match(p, relPath); matched {
-			return true
-		}
-	}
-	return false
-}
-
-// hashFile opens full, streams it through sha256, and returns an entry with the
-// digest and byte count. relPath is stored as the manifest path.
-func hashFile(full, relPath string) entry {
-	f, err := os.Open(full)
-	if err != nil {
-		return entry{path: relPath, err: err}
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return entry{path: relPath, err: err}
-	}
-	return entry{
-		path: relPath,
-		size: n,
-		hash: hex.EncodeToString(h.Sum(nil)),
-	}
+	hash string
 }
 
 func main() {
-	var (
-		outPath string
-		jobs    int
-		exclude multiFlag
-	)
-
-	flag.StringVar(&outPath, "out", "", "write manifest to this file instead of stdout")
-	flag.IntVar(&jobs, "jobs", runtime.NumCPU(), "number of hash worker goroutines")
-	flag.Var(&exclude, "exclude", "glob pattern to exclude (base name or relative path; repeatable)")
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [options] [directory]\n", os.Args[0])
-		flag.PrintDefaults()
-	}
+	var excludes globList
+	outFlag := flag.String("out", "", "write manifest to `file` instead of stdout")
+	jobsFlag := flag.Int("jobs", runtime.NumCPU(), "number of parallel hash workers")
+	flag.Var(&excludes, "exclude", "glob `pattern` to exclude (repeatable, filepath.Match syntax)")
 	flag.Parse()
 
-	dir := "."
+	root := "."
 	if flag.NArg() > 0 {
-		dir = flag.Arg(0)
-	}
-	if jobs < 1 {
-		jobs = 1
+		root = flag.Arg(0)
 	}
 
-	// validate the target directory
-	info, err := os.Stat(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "error: %s is not a directory\n", dir)
-		os.Exit(1)
-	}
-
-	// resolve to absolute so relative paths are stable regardless of cwd
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	nJobs := *jobsFlag
+	if nJobs < 1 {
+		nJobs = 1
 	}
 
 	start := time.Now()
 
-	// task channel fed by the walker; results come back from the worker pool.
-	type task struct {
-		full    string
-		relPath string
+	type workItem struct {
+		path string
+		rel  string // root-relative path for exclude matching
 	}
-	tasks := make(chan task, jobs*2)
-	results := make(chan entry, jobs*2)
 
-	// bounded worker pool
+	work := make(chan workItem, nJobs*8)
+	results := make(chan entry, nJobs*8)
+	errs := make(chan error, nJobs*8)
+
+	// Workers: receive paths, compute sha256, send entries.
 	var wg sync.WaitGroup
-	for i := 0; i < jobs; i++ {
+	for i := 0; i < nJobs; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range tasks {
-				results <- hashFile(t.full, t.relPath)
+			for item := range work {
+				e, err := hashFile(item.path)
+				if err != nil {
+					errs <- fmt.Errorf("%s: %w", item.path, err)
+					continue
+				}
+				results <- e
 			}
 		}()
 	}
 
-	// collector goroutine gathers results into a slice for sorting.
-	var entries []entry
-	collectorDone := make(chan struct{})
+	// Close results and errs once all workers finish.
 	go func() {
-		for e := range results {
-			entries = append(entries, e)
-		}
-		close(collectorDone)
+		wg.Wait()
+		close(results)
+		close(errs)
 	}()
 
-	// walk the tree, filtering and dispatching regular files to workers
-	walkErr := filepath.WalkDir(absDir, func(path string, d fs.DirEntry, err error) error {
+	// Walk the tree and feed the work channel.
+	walkErr := make(chan error, 1)
+	go func() {
+		defer close(work)
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				// Log access errors but keep walking.
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+				return nil
+			}
+			// Skip the .git directory tree.
+			if d.IsDir() && d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			// Skip symlinks.
+			if d.Type()&fs.ModeSymlink != 0 {
+				return nil
+			}
+			// Only hash regular files.
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			// Compute root-relative path for glob matching.
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				rel = path
+			}
+			// Apply exclude patterns against base name and relative path.
+			for _, pat := range excludes {
+				if ok, _ := filepath.Match(pat, d.Name()); ok {
+					return nil
+				}
+				if ok, _ := filepath.Match(pat, rel); ok {
+					return nil
+				}
+			}
+			work <- workItem{path: path, rel: rel}
+			return nil
+		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
+			walkErr <- err
+		} else {
+			close(walkErr)
+		}
+	}()
+
+	// Collect results and errors (drain both channels until closed).
+	var entries []entry
+	var errCount int
+
+	resultsDone := false
+	errsDone := false
+	for !resultsDone || !errsDone {
+		select {
+		case e, ok := <-results:
+			if !ok {
+				resultsDone = true
+				results = nil
+				continue
 			}
-			return nil
-		}
-
-		relPath, rerr := filepath.Rel(absDir, path)
-		if rerr != nil {
-			relPath = path
-		}
-
-		// never follow symlinks
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
-		}
-
-		// always skip .git directories
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
-		}
-
-		// apply user exclude patterns
-		if len(exclude) > 0 && isExcluded(relPath, exclude) {
-			if d.IsDir() {
-				return filepath.SkipDir
+			entries = append(entries, e)
+		case e, ok := <-errs:
+			if !ok {
+				errsDone = true
+				errs = nil
+				continue
 			}
-			return nil
+			fmt.Fprintf(os.Stderr, "error: %v\n", e)
+			errCount++
 		}
+	}
 
-		// only hash regular files; skip dirs, pipes, sockets, devices, etc.
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		tasks <- task{full: path, relPath: relPath}
-		return nil
-	})
-
-	close(tasks)
-	wg.Wait()
-	close(results)
-	<-collectorDone
-
-	if walkErr != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", walkErr)
+	if err := <-walkErr; err != nil {
+		fmt.Fprintf(os.Stderr, "fatal: walk error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// sort by relative path for a stable manifest
+	// Sort by path for deterministic output.
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].path < entries[j].path
 	})
 
-	// write manifest to stdout or --out
-	var out io.Writer = os.Stdout
-	if outPath != "" {
-		f, err := os.Create(outPath)
+	// Open the output destination.
+	out := io.Writer(os.Stdout)
+	if *outFlag != "" {
+		f, err := os.Create(*outFlag)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "fatal: cannot create output file: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
 		out = f
 	}
 
-	var totalSize int64
-	var errorCount int
+	// Write manifest: path TAB size TAB sha256-hex
+	var totalBytes int64
 	for _, e := range entries {
-		if e.err != nil {
-			errorCount++
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", e.path, e.err)
-			continue
-		}
-		totalSize += e.size
 		fmt.Fprintf(out, "%s\t%d\t%s\n", e.path, e.size, e.hash)
+		totalBytes += e.size
 	}
 
-	elapsed := time.Since(start)
-	fmt.Fprintf(os.Stderr, "%d files, %d bytes, %d errors, %d workers, %v\n",
-		len(entries)-errorCount, totalSize, errorCount, jobs, elapsed)
+	// Summary to stderr.
+	elapsed := time.Since(start).Round(time.Millisecond)
+	fmt.Fprintf(os.Stderr,
+		"files: %d  size: %s  errors: %d  time: %s\n",
+		len(entries), humanBytes(totalBytes), errCount, elapsed,
+	)
+}
+
+// hashFile opens path, stats it, and returns its sha256 digest.
+func hashFile(path string) (entry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return entry{}, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return entry{}, err
+	}
+	// Recheck: skip if something changed it to a non-regular file between walk and open.
+	if !info.Mode().IsRegular() {
+		return entry{}, fmt.Errorf("not a regular file (skipped)")
+	}
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return entry{}, err
+	}
+
+	return entry{
+		path: path,
+		size: info.Size(),
+		hash: fmt.Sprintf("%x", h.Sum(nil)),
+	}, nil
+}
+
+// humanBytes formats b as a human-readable size string.
+func humanBytes(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(1024), 0
+	for n := b / 1024; n >= 1024; n /= 1024 {
+		div *= 1024
+		exp++
+	}
+	return fmt.Sprintf("%.2f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }

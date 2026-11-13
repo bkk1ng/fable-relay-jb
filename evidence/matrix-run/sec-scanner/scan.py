@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-scan.py — Threaded TCP connect scanner
+scan.py — threaded TCP connect scanner
 Python 3.12, stdlib only
 
-Usage:
-    python scan.py --targets 192.168.1.0/24 --threads 100 --timeout 1.5 --output results.csv
-    python scan.py --targets hosts.txt --ports 22,80,443,8080 --threads 50 --output results.csv
+Usage examples:
+    python scan.py --cidr 10.0.0.0/24
+    python scan.py --cidr 192.168.1.1 192.168.1.50 --ports 22,80,443,8000-8090
+    python scan.py --hosts-file targets.txt --threads 200 --timeout 0.5
+    python scan.py --cidr 10.0.1.0/28 --no-banner --open-only --output found.csv
 """
 
 import argparse
@@ -13,252 +15,315 @@ import csv
 import ipaddress
 import socket
 import sys
-import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Common ports — keyed by port number, value is a human-readable service hint
 # ---------------------------------------------------------------------------
+COMMON_PORTS: dict[int, str] = {
+    21:    "ftp",
+    22:    "ssh",
+    23:    "telnet",
+    25:    "smtp",
+    53:    "dns",
+    80:    "http",
+    110:   "pop3",
+    111:   "rpcbind",
+    135:   "msrpc",
+    139:   "netbios-ssn",
+    143:   "imap",
+    443:   "https",
+    445:   "smb",
+    465:   "smtps",
+    587:   "submission",
+    631:   "ipp",
+    993:   "imaps",
+    995:   "pop3s",
+    1433:  "mssql",
+    1521:  "oracle",
+    1723:  "pptp",
+    2049:  "nfs",
+    2181:  "zookeeper",
+    2375:  "docker",
+    2376:  "docker-tls",
+    3000:  "dev-http",
+    3306:  "mysql",
+    3389:  "rdp",
+    4443:  "alt-https",
+    4848:  "glassfish",
+    5432:  "postgresql",
+    5900:  "vnc",
+    5984:  "couchdb",
+    6379:  "redis",
+    6443:  "k8s-api",
+    7001:  "weblogic",
+    8080:  "http-alt",
+    8443:  "https-alt",
+    8888:  "jupyter",
+    9000:  "php-fpm",
+    9090:  "prometheus",
+    9200:  "elasticsearch",
+    9300:  "es-cluster",
+    11211: "memcached",
+    27017: "mongodb",
+    27018: "mongodb-shard",
+    50000: "db2",
+}
 
-COMMON_PORTS: list[int] = [
-    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445,
-    465, 587, 993, 995, 1080, 1433, 1521, 2375, 2376, 3000, 3306,
-    3389, 4443, 5000, 5432, 5900, 6379, 6443, 7443, 8000, 8080,
-    8081, 8443, 8888, 9000, 9090, 9200, 9443, 27017,
-]
-
+# How much to read during a raw banner grab
 BANNER_READ_BYTES = 1024
-BANNER_TIMEOUT    = 2.0   # seconds for banner read after connect
-HTTP_TIMEOUT      = 3.0   # seconds for HTTP HEAD fallback
-DEFAULT_TIMEOUT   = 1.5   # connect timeout
-DEFAULT_THREADS   = 200
+# Separate short timeout used only during banner I/O (not the connect)
+BANNER_IO_TIMEOUT = 2.0
+
+CSV_FIELDS = ["timestamp", "host", "port", "service", "state", "banner"]
+
 
 # ---------------------------------------------------------------------------
 # Target expansion
 # ---------------------------------------------------------------------------
 
-def expand_targets(source: str) -> list[str]:
+def expand_targets(raw: list[str]) -> list[str]:
     """
-    Accept a CIDR range, a single host/IP, or a path to a file containing
-    one entry per line (CIDRs and hostnames both allowed).
-    Returns a flat list of string addresses.
+    Accept CIDR blocks, bare IPs, and hostnames; return a flat, deduplicated
+    list preserving order.  Lines starting with '#' and blank lines are skipped.
     """
-    path = Path(source)
-    if path.is_file():
-        lines = [l.strip() for l in path.read_text().splitlines() if l.strip() and not l.startswith("#")]
-    else:
-        lines = [source.strip()]
-
+    seen: set[str] = set()
     hosts: list[str] = []
-    for line in lines:
+
+    for entry in raw:
+        entry = entry.strip()
+        if not entry or entry.startswith("#"):
+            continue
         try:
-            network = ipaddress.ip_network(line, strict=False)
-            hosts.extend(str(ip) for ip in network.hosts())
+            net = ipaddress.ip_network(entry, strict=False)
+            # For a /32 or /128, hosts() is empty — use network_address instead.
+            addrs = list(net.hosts()) or [net.network_address]
+            for ip in addrs:
+                key = str(ip)
+                if key not in seen:
+                    seen.add(key)
+                    hosts.append(key)
         except ValueError:
-            hosts.append(line)   # treat as a hostname
+            # Not a valid CIDR — treat as a plain hostname/IP string.
+            if entry not in seen:
+                seen.add(entry)
+                hosts.append(entry)
+
     return hosts
 
 
 # ---------------------------------------------------------------------------
-# Port parsing
+# Port list parsing
 # ---------------------------------------------------------------------------
 
-def parse_ports(spec: str | None) -> list[int]:
+def parse_port_spec(spec: str) -> list[int]:
     """
-    Parse a comma-separated list of ports / ranges like "22,80,443,8000-8010".
-    Returns COMMON_PORTS when spec is None or empty.
+    Parse a comma-separated port spec that may include ranges, e.g.
+    "22,80,443,8000-8090".  Returns a sorted, deduplicated list.
     """
-    if not spec:
-        return COMMON_PORTS
-
     ports: set[int] = set()
-    for token in spec.split(","):
-        token = token.strip()
-        if "-" in token:
-            lo, hi = token.split("-", 1)
-            ports.update(range(int(lo), int(hi) + 1))
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            lo, hi = int(lo_s.strip()), int(hi_s.strip())
+            if not (1 <= lo <= 65535 and 1 <= hi <= 65535 and lo <= hi):
+                raise ValueError(f"bad range: {part!r}")
+            ports.update(range(lo, hi + 1))
         else:
-            ports.add(int(token))
+            port = int(part)
+            if not 1 <= port <= 65535:
+                raise ValueError(f"port out of range: {port}")
+            ports.add(port)
     return sorted(ports)
 
 
 # ---------------------------------------------------------------------------
-# Banner / service detection
+# Banner grabbing
 # ---------------------------------------------------------------------------
 
-def _try_banner(host: str, port: int) -> str:
-    """
-    Attempt a raw read immediately after connect.
-    Many services (SSH, FTP, SMTP, …) push a banner on connect.
-    """
-    try:
-        with socket.create_connection((host, port), timeout=BANNER_TIMEOUT) as s:
-            s.settimeout(BANNER_TIMEOUT)
-            data = s.recv(BANNER_READ_BYTES)
-            return data.decode("utf-8", errors="replace").strip()
-    except Exception:
-        return ""
-
-
-def _try_http_head(host: str, port: int) -> str:
-    """
-    Send a minimal HTTP HEAD / HTTP/1.0 request and return the status line
-    plus selected headers. Used as a fallback when no passive banner appears.
-    """
-    request = f"HEAD / HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    try:
-        with socket.create_connection((host, port), timeout=HTTP_TIMEOUT) as s:
-            s.settimeout(HTTP_TIMEOUT)
-            s.sendall(request.encode())
-            data = b""
-            while True:
-                chunk = s.recv(1024)
-                if not chunk:
-                    break
-                data += chunk
-                if len(data) > 4096:
-                    break
-            text = data.decode("utf-8", errors="replace").strip()
-            # Return only the status line + Server / Location headers to keep
-            # the CSV readable.
-            lines = text.splitlines()
-            interesting = [l for l in lines if l.startswith(("HTTP/", "Server:", "Location:"))]
-            return " | ".join(interesting[:5])
-    except Exception:
-        return ""
+def _decode(data: bytes) -> str:
+    """Decode bytes to a printable, single-line string (max 256 chars)."""
+    text = data.decode("latin-1", errors="replace")
+    # Collapse whitespace / control chars to spaces, then trim.
+    cleaned = " ".join(text.split())
+    return cleaned[:256]
 
 
 def grab_banner(host: str, port: int) -> str:
     """
-    Try passive banner first; fall back to HTTP HEAD for ports that look
-    web-ish or when no banner is received.
+    1. Open a fresh connection and wait briefly for the server to speak first
+       (many protocols — SSH, FTP, SMTP — send a greeting on connect).
+    2. If the server says nothing, fall back to an HTTP/1.0 HEAD request so
+       we still get a status line + Server header from web services.
+    Returns a single sanitised line, or "" on failure.
     """
-    banner = _try_banner(host, port)
-    if banner:
-        return banner[:256]   # truncate to keep CSV tidy
+    # --- raw read ---
+    try:
+        with socket.create_connection((host, port), timeout=BANNER_IO_TIMEOUT) as s:
+            s.settimeout(BANNER_IO_TIMEOUT)
+            try:
+                data = s.recv(BANNER_READ_BYTES)
+                if data:
+                    return _decode(data)
+            except (socket.timeout, OSError):
+                pass
+    except OSError:
+        pass
 
-    # HTTP HEAD fallback for common web ports or any port that returned nothing
-    if port in {80, 443, 8000, 8080, 8081, 8443, 8888, 9000, 9090, 9443, 4443, 7443, 3000, 5000}:
-        http_banner = _try_http_head(host, port)
-        if http_banner:
-            return http_banner[:256]
+    # --- HTTP HEAD fallback ---
+    try:
+        with socket.create_connection((host, port), timeout=BANNER_IO_TIMEOUT) as s:
+            s.settimeout(BANNER_IO_TIMEOUT)
+            request = (
+                f"HEAD / HTTP/1.0\r\n"
+                f"Host: {host}\r\n"
+                f"User-Agent: scan/1.0\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+            ).encode()
+            s.sendall(request)
+            # Collect headers only — stop at the blank line or 4 KB.
+            buf = b""
+            while len(buf) < 4096:
+                try:
+                    chunk = s.recv(512)
+                except (socket.timeout, OSError):
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\r\n\r\n" in buf:
+                    buf = buf.split(b"\r\n\r\n", 1)[0]
+                    break
+            if buf:
+                # Return the first response line (e.g. "HTTP/1.1 200 OK").
+                first_line = buf.split(b"\r\n", 1)[0]
+                return _decode(first_line)
+    except OSError:
+        pass
 
     return ""
 
 
 # ---------------------------------------------------------------------------
-# Single scan task
+# Per-port scan task
 # ---------------------------------------------------------------------------
 
-def scan_port(host: str, port: int, timeout: float) -> dict:
+def scan_port(host: str, port: int, timeout: float, grab: bool) -> dict:
     """
-    Attempt a TCP connect to host:port.
-    Returns a dict with keys: host, port, state, banner, latency_ms.
+    Attempt a TCP connect.  On success, optionally grab a banner.
+    Returns a result dict with keys matching CSV_FIELDS.
+    States: open | closed | filtered | error:<msg>
     """
-    result = {
-        "host":       host,
-        "port":       port,
-        "state":      "closed",
-        "banner":     "",
-        "latency_ms": "",
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    service = COMMON_PORTS.get(port, "")
+
+    base: dict = {
+        "timestamp": ts,
+        "host":      host,
+        "port":      port,
+        "service":   service,
+        "state":     "closed",
+        "banner":    "",
     }
-    t0 = time.monotonic()
+
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            latency = (time.monotonic() - t0) * 1000
-            result["state"]      = "open"
-            result["latency_ms"] = f"{latency:.1f}"
-            result["banner"]     = grab_banner(host, port)
-    except (ConnectionRefusedError, socket.timeout, TimeoutError):
-        pass
-    except OSError:
-        result["state"] = "filtered"
-    return result
+            base["state"] = "open"
+    except ConnectionRefusedError:
+        base["state"] = "closed"
+        return base
+    except socket.timeout:
+        base["state"] = "filtered"
+        return base
+    except OSError as exc:
+        base["state"] = f"error: {exc}"
+        return base
+
+    if grab:
+        base["banner"] = grab_banner(host, port)
+
+    return base
 
 
 # ---------------------------------------------------------------------------
-# CSV writer
-# ---------------------------------------------------------------------------
-
-CSV_FIELDS = ["host", "port", "state", "banner", "latency_ms"]
-
-
-def write_results(rows: list[dict], output_path: str) -> None:
-    with open(output_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
-def print_summary(rows: list[dict]) -> None:
-    open_rows = [r for r in rows if r["state"] == "open"]
-    counts: dict[int, int] = defaultdict(int)
-    for r in open_rows:
-        counts[r["port"]] += 1
-
-    print(f"\n{'─' * 52}")
-    print(f"  Total probes : {len(rows)}")
-    print(f"  Open         : {len(open_rows)}")
-    print(f"  Closed       : {sum(1 for r in rows if r['state'] == 'closed')}")
-    print(f"  Filtered     : {sum(1 for r in rows if r['state'] == 'filtered')}")
-    if counts:
-        print(f"\n  Open port counts:")
-        for port in sorted(counts):
-            print(f"    {port:<6} {counts[port]} host(s)")
-    print(f"{'─' * 52}\n")
-
-
-# ---------------------------------------------------------------------------
-# CLI
+# Argument parser
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Threaded TCP connect scanner — CIDR/host-list → CSV",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        prog="scan.py",
+        description=(
+            "Threaded TCP connect scanner.  "
+            "Accepts CIDR blocks or a host list file, "
+            "grabs banners, and writes per-port results to CSV."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  python scan.py --cidr 192.168.1.0/24\n"
+            "  python scan.py --cidr 10.0.0.1 --ports 22,80,443\n"
+            "  python scan.py --hosts-file targets.txt --threads 250 --timeout 0.5\n"
+            "  python scan.py --cidr 10.0.0.0/28 --no-banner --open-only"
+        ),
     )
-    p.add_argument(
-        "--targets", "-t",
-        required=True,
-        help="CIDR range, single host, or path to a file with one host/CIDR per line.",
+
+    tg = p.add_mutually_exclusive_group(required=True)
+    tg.add_argument(
+        "--cidr",
+        metavar="NETWORK",
+        nargs="+",
+        help="One or more CIDR blocks or plain IPs/hostnames",
     )
+    tg.add_argument(
+        "--hosts-file",
+        metavar="FILE",
+        help="Text file with one host or CIDR per line (# lines ignored)",
+    )
+
     p.add_argument(
-        "--ports", "-p",
+        "--ports",
+        metavar="SPEC",
         default=None,
         help=(
-            "Comma-separated ports or ranges (e.g. 22,80,443,8000-8010). "
-            "Omit to use the built-in common-port list."
+            "Comma-separated ports / ranges, e.g. 22,80,443,8000-8080.  "
+            "Defaults to the built-in common-port list."
         ),
     )
     p.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_TIMEOUT,
-        metavar="SECONDS",
-        help="TCP connect timeout per port.",
+        default=1.0,
+        metavar="SECS",
+        help="TCP connect timeout per port in seconds (default: 1.0)",
     )
     p.add_argument(
         "--threads",
         type=int,
-        default=DEFAULT_THREADS,
+        default=100,
         metavar="N",
-        help="Thread pool size.",
+        help="Thread pool size (default: 100)",
     )
     p.add_argument(
-        "--output", "-o",
-        default="scan_results.csv",
-        help="CSV output file path.",
+        "--no-banner",
+        action="store_true",
+        help="Skip banner grabbing — faster but no service detail",
     )
     p.add_argument(
         "--open-only",
         action="store_true",
-        help="Write only open ports to the CSV (closed/filtered rows are still counted in the summary).",
+        help="Write only open-port rows to CSV; filtered/closed rows are omitted",
+    )
+    p.add_argument(
+        "--output",
+        metavar="FILE",
+        default="scan_results.csv",
+        help="CSV output path (default: scan_results.csv)",
     )
     return p
 
@@ -267,56 +332,119 @@ def build_parser() -> argparse.ArgumentParser:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> int:
+def main() -> None:
     parser = build_parser()
-    args   = parser.parse_args()
+    args = parser.parse_args()
 
-    targets = expand_targets(args.targets)
-    ports   = parse_ports(args.ports)
+    # --- resolve targets ---
+    if args.cidr:
+        raw_targets = args.cidr
+    else:
+        host_path = Path(args.hosts_file)
+        if not host_path.is_file():
+            parser.error(f"hosts file not found: {args.hosts_file}")
+        raw_targets = host_path.read_text(encoding="utf-8").splitlines()
 
-    total_tasks = len(targets) * len(ports)
+    hosts = expand_targets(raw_targets)
+    if not hosts:
+        parser.error("no valid targets found in input")
+
+    # --- resolve ports ---
+    if args.ports:
+        try:
+            ports = parse_port_spec(args.ports)
+        except ValueError as exc:
+            parser.error(f"invalid port spec — {exc}")
+    else:
+        ports = sorted(COMMON_PORTS)
+
+    grab = not args.no_banner
+    total = len(hosts) * len(ports)
+
     print(
-        f"Scanning {len(targets)} host(s) × {len(ports)} port(s) "
-        f"= {total_tasks} probes  |  threads={args.threads}  timeout={args.timeout}s"
+        f"Scanning  {len(hosts)} host(s)  ×  {len(ports)} port(s)  =  {total} tasks\n"
+        f"          threads={args.threads}  timeout={args.timeout}s  "
+        f"banner={'on' if grab else 'off'}  output={args.output}"
     )
+    print()
 
-    all_results: list[dict] = []
-    completed   = 0
+    # --- dispatch ---
+    results: list[dict] = []
+    completed = 0
 
     with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        futures = {
-            pool.submit(scan_port, host, port, args.timeout): (host, port)
-            for host in targets
+        future_map = {
+            pool.submit(scan_port, host, port, args.timeout, grab): (host, port)
+            for host in hosts
             for port in ports
         }
-        for future in as_completed(futures):
+
+        for future in as_completed(future_map):
             completed += 1
-            result = future.result()
-            all_results.append(result)
+            if completed % 200 == 0 or completed == total:
+                pct = completed / total * 100
+                print(f"  progress: {completed}/{total}  ({pct:.1f}%)", end="\r", flush=True)
 
-            if result["state"] == "open":
-                print(
-                    f"  OPEN  {result['host']:>45}:{result['port']:<6}"
-                    f"  {result['latency_ms']:>7} ms"
-                    f"  {result['banner'][:60]}"
-                )
+            try:
+                result = future.result()
+            except Exception as exc:
+                host, port = future_map[future]
+                result = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "host":    host,
+                    "port":    port,
+                    "service": COMMON_PORTS.get(port, ""),
+                    "state":   f"error: {exc}",
+                    "banner":  "",
+                }
+            results.append(result)
 
-            # Progress tick every 500 completions
-            if completed % 500 == 0:
-                pct = completed / total_tasks * 100
-                print(f"  ... {completed}/{total_tasks} ({pct:.0f}%)")
+    print()  # clear the progress line
 
-    # Sort: open first, then by host / port
-    state_order = {"open": 0, "filtered": 1, "closed": 2}
-    all_results.sort(key=lambda r: (state_order.get(r["state"], 9), r["host"], r["port"]))
+    # --- sort by host then port ---
+    results.sort(key=lambda r: (r["host"], int(r["port"])))
 
-    csv_rows = [r for r in all_results if r["state"] == "open"] if args.open_only else all_results
-    write_results(csv_rows, args.output)
-    print(f"\nResults written to: {args.output}  ({len(csv_rows)} rows)")
+    # --- write CSV ---
+    output_path = Path(args.output)
+    rows_written = 0
+    with output_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in results:
+            if args.open_only and row["state"] != "open":
+                continue
+            writer.writerow(row)
+            rows_written += 1
 
-    print_summary(all_results)
-    return 0
+    print(f"Wrote {rows_written} row(s) to {output_path}")
+
+    # --- summary ---
+    open_by_host: dict[str, list[int]] = {}
+    for row in results:
+        if row["state"] == "open":
+            open_by_host.setdefault(row["host"], []).append(int(row["port"]))
+
+    total_open = sum(len(v) for v in open_by_host.values())
+    divider = "─" * 62
+
+    print()
+    print(divider)
+    print(f"  Open ports: {total_open}  across  {len(open_by_host)} host(s)")
+
+    if open_by_host:
+        print()
+        for host in sorted(open_by_host, key=lambda h: (
+            # Sort numerically when it looks like an IP, lexically otherwise.
+            [int(x) for x in h.split(".")] if h.replace(".", "").isdigit() else [h]
+        )):
+            port_list = ", ".join(
+                f"{p}/{COMMON_PORTS.get(p, '?')}"
+                for p in sorted(open_by_host[host])
+            )
+            print(f"  {host:<22} {port_list}")
+
+    print(divider)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

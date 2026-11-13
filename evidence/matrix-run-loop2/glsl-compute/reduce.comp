@@ -1,0 +1,49 @@
+#version 450
+
+// Parallel reduction: sum of a float array using shared memory tree reduction.
+// Dispatch with ceil(elementCount / 256) workgroups in X.
+// Each workgroup writes one partial sum to partialSums[gl_WorkGroupID.x].
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    float data[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    float partialSums[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint elementCount;
+} pc;
+
+shared float sdata[256];
+
+void main() {
+    uint tid   = gl_LocalInvocationID.x;
+    uint gid   = gl_GlobalInvocationID.x;
+
+    // Load one element per thread; pad out-of-range lanes with 0.0 so they
+    // contribute nothing to the sum without requiring a branch in the tree.
+    sdata[tid] = (gid < pc.elementCount) ? data[gid] : 0.0;
+
+    barrier();
+    memoryBarrierShared();
+
+    // Tree reduction: each step halves the active thread count.
+    // All 256 threads participate in every barrier so the workgroup stays
+    // synchronised; only the threads whose stride index is in-range write.
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            sdata[tid] += sdata[tid + stride];
+        }
+        barrier();
+        memoryBarrierShared();
+    }
+
+    // Thread 0 holds the workgroup total; write it to the per-group output.
+    if (tid == 0u) {
+        partialSums[gl_WorkGroupID.x] = sdata[0];
+    }
+}

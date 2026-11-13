@@ -1,92 +1,105 @@
 /*
- * ini.h — C11 INI parser
+ * ini.h — C11 INI parser, callback-based, zero heap allocation.
  *
- * Features
- *   - Sections:          [section]
- *   - Key/value pairs:   key = value
- *   - Comments:          ; ... and # ... (line-start or inline after whitespace)
- *   - Quoted values:     "..." and '...' with escape sequences
- *   - Escape sequences:  \\ \" \' \n \r \t \0 \xHH
- *   - Duplicate keys:    detected and reported with line number
- *   - Allocation:        none beyond a stack-local line buffer
+ * Usage:
+ *   ini_parse_file(fp, my_handler, userdata, errbuf, sizeof errbuf);
  *
- * Usage
- *   Open a FILE *, call ini_parse_file() with your handler, check the return.
- *   The file is not closed by the parser.
+ * The parser recognises:
+ *   [section]           section headers
+ *   key = value         key/value pairs (whitespace around both is stripped)
+ *   ; comment           semicolon comments (whole line or inline)
+ *   # comment           hash comments    (whole line or inline)
+ *   "value with\n esc"  double-quoted values with escape sequences
  *
- * Tunables (define before including, or via -D)
- *   INI_MAX_LINE   Maximum bytes per line including the NUL  (default 1024)
- *   INI_MAX_NAME   Maximum bytes in a section or key name    (default 128)
- *   INI_MAX_KEYS   Hash-table slots for duplicate detection  (default 512)
- *                  Must be a power of two.
+ * Escape sequences inside double-quoted values:
+ *   \\  \  \"  "  \'  '  \n  LF  \t  HT  \r  CR  \0  NUL
+ *
+ * Duplicate section.key pairs within a single parse call are detected and
+ * cause INI_ERR_DUPLICATE to be returned.
+ *
+ * The only storage allocated inside ini_parse_file() beyond automatic
+ * variables is a fixed line buffer and a fixed-size open-addressing hash
+ * table, both on the stack (~32 KB combined worst case).
  */
 
 #ifndef INI_H
 #define INI_H
 
+#include <stddef.h>
 #include <stdio.h>
 
-#ifndef INI_MAX_LINE
-#  define INI_MAX_LINE 1024
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-#ifndef INI_MAX_NAME
-#  define INI_MAX_NAME 128
-#endif
-
-#ifndef INI_MAX_KEYS
-#  define INI_MAX_KEYS 512
-#endif
-
-/* Return codes from ini_parse_file(). */
-typedef enum {
-    INI_OK          =  0,  /* Parsed to end of file without error.           */
-    INI_ERR_IO      = -1,  /* fgets() / ferror() reported an I/O error.      */
-    INI_ERR_SYNTAX  = -2,  /* Malformed line, bad section header, or unknown
-                              escape sequence.  *errline is set.             */
-    INI_ERR_LINE_LEN= -3,  /* A line exceeded INI_MAX_LINE-1 bytes.          */
-    INI_ERR_DUP_KEY = -4,  /* The same section+key pair appeared twice.
-                              *errline is the line of the second occurrence. */
-    INI_ERR_HANDLER = -5,  /* The caller's handler returned non-zero.        */
-} ini_error_t;
+/* Maximum byte length of a single line including the newline and NUL. */
+#define INI_LINE_MAX 4096
 
 /*
- * ini_handler_t — callback invoked for every key/value pair.
+ * Return codes from ini_parse_file() and from ini_handler_t.
  *
- *   user     Caller-provided context pointer, passed through unchanged.
- *   section  Current section name; empty string "" for keys before any
- *            section header.
- *   key      Key name, with leading/trailing whitespace stripped.
- *   value    Value string: for quoted values the quotes and escapes have been
- *            resolved; for unquoted values trailing whitespace and any inline
- *            comment have been stripped.
- *   lineno   1-based line number of this key in the source file.
- *
- * Return 0 to continue parsing, any other value to abort with INI_ERR_HANDLER.
+ *   INI_OK            Parsing completed successfully.
+ *   INI_STOP          Handler returned non-zero; parsing was stopped cleanly.
+ *   INI_ERR_IO        fgets() failed or NULL file/handler was supplied.
+ *   INI_ERR_SYNTAX    Malformed line (error position in errbuf).
+ *   INI_ERR_DUPLICATE Duplicate section.key pair detected.
+ *   INI_ERR_OVERFLOW  Internal duplicate-detection table exhausted.
+ *                     Increase INI_DEDUP_POOL / INI_DEDUP_SLOTS in ini.c if
+ *                     the file has an unusually large number of unique keys.
  */
-typedef int (*ini_handler_t)(void       *user,
-                             const char *section,
+typedef enum {
+    INI_OK            =  0,
+    INI_STOP          =  1,
+    INI_ERR_IO        = -1,
+    INI_ERR_SYNTAX    = -2,
+    INI_ERR_DUPLICATE = -3,
+    INI_ERR_OVERFLOW  = -4
+} ini_result_t;
+
+/*
+ * ini_handler_t — callback invoked for each key/value pair.
+ *
+ *   section   Current [section] name, stripped of whitespace.
+ *             Empty string ("") if the pair precedes the first header.
+ *   key       Key name, stripped of surrounding whitespace.
+ *   value     Value string.  If the original was double-quoted, the quotes
+ *             have been removed and escape sequences have been expanded.
+ *             Otherwise trailing whitespace and inline comments are stripped.
+ *   lineno    1-based line number of this pair in the stream.
+ *   userdata  Forwarded unchanged from ini_parse_file().
+ *
+ * Return 0 to continue parsing.
+ * Return any non-zero value to stop; ini_parse_file() will return INI_STOP.
+ */
+typedef int (*ini_handler_t)(const char *section,
                              const char *key,
                              const char *value,
-                             int         lineno);
+                             int         lineno,
+                             void       *userdata);
 
 /*
- * ini_parse_file — parse an already-opened FILE *.
+ * ini_parse_file — parse an already-open, readable FILE stream.
  *
- *   fp       Readable FILE *.  The parser does not close or rewind it.
- *   handler  Callback invoked once per key/value pair.
- *   user     Passed to every handler invocation.
- *   errline  If non-NULL, receives the 1-based line number on any error;
- *            set to 0 on INI_OK and INI_ERR_IO.
+ *   f           Stream to read from (must be open in text or binary mode).
+ *               The caller retains ownership; the stream is not closed here.
+ *   handler     Invoked for every key/value pair found.
+ *   userdata    Forwarded to every handler call; may be NULL.
+ *   errbuf      If non-NULL, receives a human-readable error message
+ *               including the line number when the return value is not
+ *               INI_OK or INI_STOP.  Always NUL-terminated.
+ *   errbuf_len  Byte capacity of errbuf.  Ignored when errbuf is NULL.
  *
- * Returns INI_OK on success, or a negative ini_error_t code on failure.
+ * Returns INI_OK on clean completion, INI_STOP if the handler requested
+ * early termination, or a negative ini_result_t on error.
  */
-ini_error_t ini_parse_file(FILE         *fp,
-                           ini_handler_t handler,
-                           void         *user,
-                           int          *errline);
+ini_result_t ini_parse_file(FILE          *f,
+                             ini_handler_t  handler,
+                             void          *userdata,
+                             char          *errbuf,
+                             size_t         errbuf_len);
 
-/* ini_strerror — human-readable string for an ini_error_t code. */
-const char *ini_strerror(ini_error_t err);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* INI_H */

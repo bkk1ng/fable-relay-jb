@@ -1,0 +1,19 @@
+{
+ "id": "cpp-json",
+ "lang": "cpp",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "cpp",
+ "ask": "C++17, no external libraries. json.hpp and main.cpp: recursive-descent JSON parser producing a Value variant (null/bool/double/string/array/object), string escape handling, error with offset, plus a serializer with optional pretty printing. main parses a sample document and round-trips it. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 502,
+ "verdict": "ERR",
+ "cause": "error",
+ "detail": "error code: 502\n",
+ "stop": null,
+ "out_tokens": null,
+ "files": {},
+ "prose": "error code: 502\n",
+ "secs": 423.2
+}

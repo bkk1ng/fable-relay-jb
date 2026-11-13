@@ -1,405 +1,377 @@
 #!/usr/bin/env python3
 """
-dedupe.py — streaming JSON Lines deduplicator
+dedupe.py — Streaming JSON Lines deduplicator with bounded-memory strategy.
 
-Reads JSON Lines from stdin or a file, deduplicates records by a composite
-key, and writes unique records to stdout or a file.
+Reads JSON Lines from a file or stdin, deduplicates records by a composite key,
+and writes unique records to a file or stdout.  Stats go to stderr.
 
-Memory strategy
-───────────────
-Phase 1 (in-memory): 8-byte blake2b digests are held in a plain Python set.
-Phase 2 (on-disk):   Once the set reaches --spill-at entries the entire set is
-                     migrated to a temporary SQLite database and the in-memory
-                     set is released.  All subsequent lookups and inserts use
-                     SQLite.  The temp file is deleted on clean exit.
+Memory model
+------------
+  An in-memory Python set holds 8-byte BLAKE2b digests of composite keys.
+  When that set reaches --spill (default 500 000) entries, its contents are
+  flushed to a temporary dbm database and the set is cleared.  Every lookup
+  checks the in-memory set first, then the on-disk store if one exists.
+  Peak RSS stays close to: threshold × 8 bytes  (≈ 4 MB at the default).
 
-Stats are printed to stderr so stdout stays clean when piped.
+Usage
+-----
+  python dedupe.py -k id,timestamp input.jsonl -o output.jsonl
+  cat records.jsonl | python dedupe.py -k user_id,event > clean.jsonl
 
-Usage examples
-──────────────
-  # deduplicate on a single field
-  python dedupe.py --key id < raw.jsonl > clean.jsonl
-
-  # composite key; explicit files; custom spill threshold
-  python dedupe.py -k user_id event_type -i raw.jsonl -o clean.jsonl --spill-at 500000
-
-  # pipe with low memory limit (useful for testing spill path)
-  cat raw.jsonl | python dedupe.py -k id --spill-at 100
+Options
+-------
+  -k / --keys         Comma-separated composite-key field names  [required]
+  -o / --output       Output file path                           [default: stdout]
+  -n / --spill        In-memory digest cap before disk spill     [default: 500 000]
+  --null-missing      Treat absent key fields as null instead of skipping the record
+  positional INPUT    Input JSON Lines file                      [default: stdin]
 """
 
+from __future__ import annotations
+
 import argparse
+import dbm
 import hashlib
 import json
 import os
-import sqlite3
 import sys
 import tempfile
 import time
 from collections import defaultdict
-from pathlib import Path
-from typing import Iterator
-
-# ── constants ────────────────────────────────────────────────────────────────
-
-DEFAULT_SPILL_AT   = 1_000_000   # digest count that triggers disk spill
-DEFAULT_BATCH      = 10_000      # SQLite commit cadence (output records)
-DEFAULT_TOP_DUPES  = 20          # rows shown in the duplicate-key report
-DIGEST_BYTES       = 8           # blake2b output size in bytes
 
 
-# ── key hashing ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-def make_digest(record: dict, key_fields: list[str]) -> bytes:
+DIGEST_BYTES = 8  # 64-bit digest; birthday collision at ~4 billion unique keys
+
+
+# ---------------------------------------------------------------------------
+# Key hashing
+# ---------------------------------------------------------------------------
+
+def encode_key(record: dict, fields: list[str], null_missing: bool) -> bytes:
     """
-    Return an 8-byte blake2b digest of the composite key.
+    Return a canonical UTF-8 byte string representing the composite key.
 
-    Fields are JSON-serialised and joined with a null-byte separator so that
-    ("ab", "c") and ("a", "bc") produce different digests.
+    The key is the JSON encoding of the ordered list of field values, so it
+    is unambiguous even when values contain commas or other delimiters.
     """
-    parts = [
-        json.dumps(record.get(f), sort_keys=True, ensure_ascii=False)
-        for f in key_fields
-    ]
-    raw = "\x00".join(parts).encode()
-    return hashlib.blake2b(raw, digest_size=DIGEST_BYTES).digest()
+    parts: list = []
+    for f in fields:
+        if f not in record:
+            if null_missing:
+                parts.append(None)
+            else:
+                raise KeyError(f)
+        else:
+            parts.append(record[f])
+    return json.dumps(parts, separators=(",", ":"), sort_keys=True,
+                      ensure_ascii=False).encode()
 
 
-def key_label(record: dict, key_fields: list[str]) -> str:
-    """Human-readable composite key for the stats report."""
-    return "|".join(str(record.get(f)) for f in key_fields)
+def digest(key_bytes: bytes) -> bytes:
+    """Return an 8-byte BLAKE2b digest of the composite-key bytes."""
+    return hashlib.blake2b(key_bytes, digest_size=DIGEST_BYTES).digest()
 
 
-# ── deduplication store ───────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Bounded-memory digest set
+# ---------------------------------------------------------------------------
 
-class DedupStore:
+class DigestSet:
     """
-    Bounded-memory set of 8-byte digests.
+    Set of 8-byte digests with an on-disk spill tier.
 
-    Public methods: seen(), add(), flush(), close()
-    Public properties: spilled, mem_size, db_path, db_size_bytes
+    When the in-memory set reaches `threshold` items, every entry is written
+    to a dbm file and the set is cleared.  Membership checks probe memory
+    first, then disk.
     """
 
-    def __init__(self, spill_at: int, tmp_dir: str | None = None) -> None:
-        self._spill_at  = spill_at
-        self._tmp_dir   = tmp_dir
+    def __init__(self, threshold: int, spill_dir: str) -> None:
+        if threshold < 1:
+            raise ValueError("threshold must be >= 1")
+        self.threshold = threshold
         self._mem: set[bytes] = set()
-        self._conn: sqlite3.Connection | None = None
-        self._db_path: Path | None = None
-        self._spilled   = False
+        self._db: dbm.error | None = None          # opened on first spill
+        self._db_path: str = os.path.join(spill_dir, "digest_spill")
+        self.spill_count: int = 0
 
-    # ── read-only properties ──────────────────────────────────────────────
+    # -- public interface ----------------------------------------------------
 
-    @property
-    def spilled(self) -> bool:
-        return self._spilled
+    def __contains__(self, d: bytes) -> bool:
+        return d in self._mem or (self._db is not None and d in self._db)
+
+    def add(self, d: bytes) -> None:
+        """Add a digest; spill in-memory set to disk if threshold is reached."""
+        self._mem.add(d)
+        if len(self._mem) >= self.threshold:
+            self._spill()
+
+    def close(self) -> None:
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
+    # -- properties ----------------------------------------------------------
 
     @property
     def mem_size(self) -> int:
-        """Current number of digests held in the in-memory set."""
         return len(self._mem)
 
-    @property
-    def db_path(self) -> Path | None:
-        return self._db_path
-
-    @property
-    def db_size_bytes(self) -> int:
-        """Size of the spill DB on disk, or 0 if not yet spilled."""
-        if self._db_path and self._db_path.exists():
-            return self._db_path.stat().st_size
-        return 0
-
-    # ── core API ──────────────────────────────────────────────────────────
-
-    def seen(self, digest: bytes) -> bool:
-        """Return True if *digest* has been recorded before."""
-        if digest in self._mem:
-            return True
-        if self._spilled:
-            row = self._conn.execute(          # type: ignore[union-attr]
-                "SELECT 1 FROM seen WHERE digest = ? LIMIT 1", (digest,)
-            ).fetchone()
-            return row is not None
-        return False
-
-    def add(self, digest: bytes) -> None:
-        """Record *digest* as seen."""
-        if self._spilled:
-            self._conn.execute(                # type: ignore[union-attr]
-                "INSERT OR IGNORE INTO seen VALUES (?)", (digest,)
-            )
-        else:
-            self._mem.add(digest)
-            if len(self._mem) >= self._spill_at:
-                self._spill()
-
-    def flush(self) -> None:
-        """Commit any pending SQLite writes."""
-        if self._conn:
-            self._conn.commit()
-
-    def close(self) -> None:
-        """Commit, close, and delete the spill database."""
-        if self._conn:
-            try:
-                self._conn.commit()
-                self._conn.close()
-            finally:
-                self._conn = None
-        if self._db_path:
-            self._db_path.unlink(missing_ok=True)
-            self._db_path = None
-
-    # ── internal ──────────────────────────────────────────────────────────
+    # -- internals -----------------------------------------------------------
 
     def _spill(self) -> None:
-        """
-        Migrate everything from the in-memory set to SQLite, then clear RAM.
-
-        SQLite is opened with WAL + NORMAL sync for throughput; PRIMARY KEY on
-        the BLOB column gives O(log n) lookup and duplicate rejection for free.
-        """
-        fd, path = tempfile.mkstemp(
-            suffix=".db", prefix="dedupe_spill_", dir=self._tmp_dir
-        )
-        os.close(fd)
-        self._db_path = Path(path)
-
-        conn = sqlite3.connect(str(self._db_path), isolation_level=None)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous  = NORMAL")
-        conn.execute(
-            "CREATE TABLE seen (digest BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID"
-        )
-
-        # Bulk-load existing in-memory digests in one transaction.
-        conn.execute("BEGIN")
-        conn.executemany("INSERT OR IGNORE INTO seen VALUES (?)",
-                         ((d,) for d in self._mem))
-        conn.execute("COMMIT")
-
-        # Switch to manual transaction mode for subsequent writes.
-        conn.isolation_level = ""  # '' = deferred, managed by our flush() calls
-        conn.execute("BEGIN")
-
-        self._conn    = conn
-        self._spilled = True
+        """Flush in-memory set to the dbm file and clear it."""
+        if self._db is None:
+            self._db = dbm.open(self._db_path, "c")
+        for d in self._mem:
+            self._db[d] = b""
         self._mem.clear()
-        self._mem = set()   # release the old set's backing storage
+        self.spill_count += 1
 
 
-# ── record iterator ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# ETL core
+# ---------------------------------------------------------------------------
 
-def iter_lines(src) -> Iterator[tuple[int, str, dict | None]]:
+def process(
+    in_stream,
+    out_stream,
+    fields: list[str],
+    threshold: int,
+    null_missing: bool,
+    spill_dir: str,
+) -> dict:
     """
-    Yield (lineno, raw_line, parsed) for every non-empty line.
+    Stream records, deduplicate, and write clean output.
 
-    *parsed* is None when the line is not valid JSON.
+    Returns a stats dict suitable for display.
     """
-    for lineno, raw in enumerate(src, start=1):
-        raw = raw.rstrip("\n")
-        if not raw:
+    seen = DigestSet(threshold, spill_dir)
+    # Maps digest → number of *extra* occurrences (i.e. dupe count, not total).
+    # Keyed by digest to avoid storing the full key string for every dupe.
+    dupe_counts: defaultdict[bytes, int] = defaultdict(int)
+
+    total = 0
+    dupes = 0
+    skipped = 0
+    t0 = time.monotonic()
+
+    for lineno, raw in enumerate(in_stream, 1):
+        line = raw.rstrip("\n")
+        if not line:
             continue
+
+        # Parse ---------------------------------------------------------------
         try:
-            yield lineno, raw, json.loads(raw)
-        except json.JSONDecodeError:
-            yield lineno, raw, None
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"[warn] line {lineno}: JSON parse error — {exc}", file=sys.stderr)
+            skipped += 1
+            continue
 
+        if not isinstance(record, dict):
+            print(f"[warn] line {lineno}: expected JSON object, got "
+                  f"{type(record).__name__}", file=sys.stderr)
+            skipped += 1
+            continue
 
-# ── main logic ────────────────────────────────────────────────────────────────
+        total += 1
 
-def run(args: argparse.Namespace) -> int:
-    key_fields: list[str] = args.key
-
-    store = DedupStore(spill_at=args.spill_at, tmp_dir=args.tmp_dir)
-
-    # Tracks how many extra copies were seen per composite key string.
-    # Only populated for keys that actually have at least one duplicate.
-    dupe_counts: dict[str, int] = defaultdict(int)
-
-    total        = 0
-    written      = 0
-    skipped      = 0
-    parse_errors = 0
-    t0           = time.monotonic()
-
-    try:
-        in_fh  = open(args.input,  encoding="utf-8")           if args.input  else sys.stdin
-        out_fh = open(args.output, "w", encoding="utf-8")      if args.output else sys.stdout
-
+        # Composite key -------------------------------------------------------
         try:
-            for lineno, raw, record in iter_lines(in_fh):
-                total += 1
+            key_bytes = encode_key(record, fields, null_missing)
+        except KeyError as exc:
+            field = exc.args[0]
+            print(f"[warn] line {lineno}: missing key field {field!r} — "
+                  "skipping (use --null-missing to treat as null)", file=sys.stderr)
+            skipped += 1
+            total -= 1
+            continue
 
-                if record is None:
-                    parse_errors += 1
-                    print(
-                        f"[dedupe] line {lineno}: JSON parse error — skipping",
-                        file=sys.stderr,
-                    )
-                    continue
+        d = digest(key_bytes)
 
-                digest = make_digest(record, key_fields)
-
-                if store.seen(digest):
-                    dupe_counts[key_label(record, key_fields)] += 1
-                    skipped += 1
-                else:
-                    store.add(digest)
-                    out_fh.write(raw + "\n")
-                    written += 1
-                    # Commit pending SQLite writes on a regular cadence so the
-                    # WAL file stays bounded.
-                    if store.spilled and written % args.batch == 0:
-                        store.flush()
-
-        finally:
-            store.flush()
-            if args.input  and not in_fh.closed:
-                in_fh.close()
-            if args.output and not out_fh.closed:
-                out_fh.close()
-
-    finally:
-        db_bytes = store.db_size_bytes   # read before close() deletes the file
-        store.close()
+        # Deduplicate ---------------------------------------------------------
+        if d in seen:
+            dupe_counts[d] += 1
+            dupes += 1
+        else:
+            seen.add(d)
+            out_stream.write(line + "\n")
 
     elapsed = time.monotonic() - t0
-    _print_stats(
-        key_fields   = key_fields,
-        total        = total,
-        written      = written,
-        skipped      = skipped,
-        parse_errors = parse_errors,
-        elapsed      = elapsed,
-        spilled      = store.spilled,
-        db_bytes     = db_bytes,
-        dupe_counts  = dupe_counts,
-        top_n        = args.top_dupes,
-    )
-    return 0
+    seen.close()
+
+    return {
+        "total": total,
+        "unique": total - dupes,
+        "duplicates": dupes,
+        "skipped": skipped,
+        "spills": seen.spill_count,
+        "elapsed": elapsed,
+        "dupe_counts": dict(dupe_counts),   # digest(bytes) → extra count
+    }
 
 
-# ── stats printing ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Stats output
+# ---------------------------------------------------------------------------
 
-def _fmt_bytes(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n //= 1024
-    return f"{n:.1f} TB"
+def print_stats(stats: dict, fields: list[str], threshold: int) -> None:
+    total    = stats["total"]
+    unique   = stats["unique"]
+    dupes    = stats["duplicates"]
+    skipped  = stats["skipped"]
+    spills   = stats["spills"]
+    elapsed  = stats["elapsed"]
+    rate     = int(total / elapsed) if elapsed > 0 else 0
 
+    sep = "─" * 52
+    out = sys.stderr
 
-def _print_stats(
-    *,
-    key_fields:   list[str],
-    total:        int,
-    written:      int,
-    skipped:      int,
-    parse_errors: int,
-    elapsed:      float,
-    spilled:      bool,
-    db_bytes:     int,
-    dupe_counts:  dict[str, int],
-    top_n:        int,
-) -> None:
-    w = sys.stderr
-    sep = "─" * 54
+    print(sep, file=out)
+    print(f"  key fields       : {', '.join(fields)}", file=out)
+    print(f"  spill threshold  : {threshold:,}", file=out)
+    print(sep, file=out)
+    print(f"  records read     : {total:>12,}", file=out)
+    print(f"  unique written   : {unique:>12,}", file=out)
+    print(f"  duplicates found : {dupes:>12,}", file=out)
+    print(f"  skipped (errors) : {skipped:>12,}", file=out)
+    print(f"  disk spills      : {spills:>12,}", file=out)
+    print(f"  elapsed          : {elapsed:>11.3f}s", file=out)
+    print(f"  throughput       : {rate:>9,} rec/s", file=out)
 
-    print(sep, file=w)
-    print("  dedupe stats", file=w)
-    print(sep, file=w)
-    print(f"  key fields   : {', '.join(key_fields)}", file=w)
-    print(f"  total lines  : {total:>12,}", file=w)
-    print(f"  written      : {written:>12,}", file=w)
-    print(f"  duplicates   : {skipped:>12,}", file=w)
-    if parse_errors:
-        print(f"  parse errors : {parse_errors:>12,}", file=w)
-    print(f"  elapsed      : {elapsed:>11.2f}s", file=w)
-    if elapsed > 0:
-        print(f"  throughput   : {total / elapsed:>9,.0f} rec/s", file=w)
-    print(f"  disk spill   : {'yes  (' + _fmt_bytes(db_bytes) + ')' if spilled else 'no':>12}", file=w)
-    print(sep, file=w)
+    # Top duplicates by dupe count
+    dupe_counts = stats["dupe_counts"]
+    if dupe_counts:
+        top = sorted(dupe_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        print(sep, file=out)
+        print("  top duplicate keys  (digest → extra occurrences):", file=out)
+        for d, count in top:
+            print(f"    {d.hex()}  ×{count + 1:,} total ({count:,} extra)", file=out)
 
-    if dupe_counts and top_n > 0:
-        print(f"\n  top {top_n} duplicate keys  (extra copies → key)", file=w)
-        ranked = sorted(dupe_counts.items(), key=lambda x: -x[1])[:top_n]
-        for label, count in ranked:
-            print(f"  {count:>10,}  {label}", file=w)
-        if len(dupe_counts) > top_n:
-            print(f"  … and {len(dupe_counts) - top_n:,} more duplicate key(s)", file=w)
-        print(sep, file=w)
+    print(sep, file=out)
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dedupe.py",
-        description="Stream-deduplicate JSON Lines by a composite key.",
+        description=(
+            "Streaming JSON Lines deduplicator.  "
+            "Deduplicates by a composite key using a bounded-memory strategy "
+            "(in-memory BLAKE2b digest set + on-disk dbm spill)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=__doc__.split("Usage")[1] if "Usage" in __doc__ else "",
     )
     p.add_argument(
-        "--key", "-k",
-        nargs="+",
+        "input",
+        nargs="?",
+        metavar="INPUT",
+        help="Input JSON Lines file (default: stdin).",
+    )
+    p.add_argument(
+        "-k", "--keys",
         required=True,
-        metavar="FIELD",
-        help="One or more JSON field names that form the composite key.",
+        metavar="FIELD[,FIELD...]",
+        help="Comma-separated composite key field names.",
     )
     p.add_argument(
-        "--input", "-i",
-        default=None,
+        "-o", "--output",
         metavar="FILE",
-        help="Input JSON Lines file.  Reads stdin when omitted.",
+        help="Output file path (default: stdout).",
     )
     p.add_argument(
-        "--output", "-o",
-        default=None,
-        metavar="FILE",
-        help="Output JSON Lines file.  Writes stdout when omitted.",
-    )
-    p.add_argument(
-        "--spill-at",
+        "-n", "--spill",
         type=int,
-        default=DEFAULT_SPILL_AT,
+        default=500_000,
         metavar="N",
-        help=(
-            f"Migrate the in-memory digest set to a temporary SQLite database "
-            f"after N entries.  Default: {DEFAULT_SPILL_AT:,}.  "
-            f"Each entry is {DIGEST_BYTES} bytes, so the set uses roughly "
-            f"N×{DIGEST_BYTES} bytes of raw storage (Python set overhead is "
-            f"additional)."
-        ),
+        help="In-memory digest count before spilling to disk (default: 500,000).",
     )
     p.add_argument(
-        "--batch",
-        type=int,
-        default=DEFAULT_BATCH,
-        metavar="N",
+        "--null-missing",
+        action="store_true",
         help=(
-            f"Commit pending SQLite writes every N output records.  "
-            f"Default: {DEFAULT_BATCH:,}."
-        ),
-    )
-    p.add_argument(
-        "--tmp-dir",
-        default=None,
-        metavar="DIR",
-        help="Directory for the spill database.  Defaults to the system temp directory.",
-    )
-    p.add_argument(
-        "--top-dupes",
-        type=int,
-        default=DEFAULT_TOP_DUPES,
-        metavar="N",
-        help=(
-            f"Show top N duplicate keys in the stats report.  "
-            f"Default: {DEFAULT_TOP_DUPES}.  Set to 0 to suppress."
+            "Treat absent key fields as null instead of skipping the record "
+            "with a warning."
         ),
     )
     return p
 
 
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    fields = [f.strip() for f in args.keys.split(",") if f.strip()]
+    if not fields:
+        parser.error("--keys requires at least one non-empty field name.")
+
+    if args.spill < 1:
+        parser.error("--spill must be a positive integer.")
+
+    # --- open input ----------------------------------------------------------
+    if args.input:
+        try:
+            in_stream = open(args.input, "r", encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot open input — {exc}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        in_stream = sys.stdin
+
+    # --- open output ---------------------------------------------------------
+    if args.output:
+        try:
+            out_stream = open(args.output, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot open output — {exc}", file=sys.stderr)
+            if args.input:
+                in_stream.close()
+            sys.exit(1)
+    else:
+        out_stream = sys.stdout
+
+    # --- temp dir for spill --------------------------------------------------
+    spill_dir = tempfile.mkdtemp(prefix="dedupe_")
+
+    exit_code = 0
+    try:
+        stats = process(
+            in_stream, out_stream,
+            fields, args.spill, args.null_missing, spill_dir,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        exit_code = 1
+        stats = None
+    finally:
+        if args.input:
+            in_stream.close()
+        if args.output:
+            out_stream.close()
+        # Clean up spill files
+        for entry in os.listdir(spill_dir):
+            try:
+                os.remove(os.path.join(spill_dir, entry))
+            except OSError:
+                pass
+        try:
+            os.rmdir(spill_dir)
+        except OSError:
+            pass
+
+    if stats is not None:
+        print_stats(stats, fields, args.spill)
+
+    sys.exit(exit_code)
+
+
 if __name__ == "__main__":
-    sys.exit(run(build_parser().parse_args()))
+    main()

@@ -1,0 +1,85 @@
+#version 450 core
+
+// reduce.comp — parallel reduction (sum) of a float array.
+// GLSL 4.50 compute shader. local_size_x = 256.
+//
+// Each workgroup reduces one 256-element tile to a single partial sum using a
+// tree reduction over shared memory with barriers. Out-of-bounds lanes load
+// 0.0 (zero padding), so array lengths that are not a multiple of 256 — and a
+// length of 0 — are handled correctly. Each workgroup writes its partial sum to
+// output_buf.partial[gl_WorkGroupID.x]; dispatch ceil(count / 256) workgroups
+// along x and size output_buf to at least that many slots.
+//
+// Bindings (OpenGL-style):
+//   binding 0  input  SSBO   float data[]      (array to be summed)
+//   binding 1  output SSBO   float partial[]   (one entry per workgroup)
+//   binding 2  uniform UBO   uint  count       (logical array length)
+//
+// Build:
+//   glslangValidator -V reduce.comp -o reduce.comp.spv   (Vulkan / SPIR-V)
+//   glslc            reduce.comp      -o reduce.comp.spv
+//
+// Run on the host:
+//   fill input_buf, set params.count, glDispatchCompute(ceil(count/256), 1, 1),
+//   read back output_buf.partial[] and sum its groups_x entries on the CPU,
+//   or feed those partials back in for a second reduction pass.
+//
+// Mechanism:
+//   1. Each lane loads data[global_index], or 0.0 when out of bounds, into
+//      shared memory.
+//   2. barrier(); a tree reduction halves the active lanes each level until
+//      lane 0 holds the tile sum.
+//   3. Lane 0 writes shared_data[0] to this workgroup's output slot.
+
+layout(local_size_x = 256) in;
+
+// Input array of floats to be summed.
+layout(binding = 0) buffer InputBuffer {
+    float data[];
+} input_buf;
+
+// One float per workgroup: the partial sum computed by that workgroup.
+layout(binding = 1) buffer OutputBuffer {
+    float partial[];
+} output_buf;
+
+// Number of elements in the logical array (may exceed input_buf's backing
+// size only if you deliberately want to stop early; normally equals it).
+layout(binding = 2) uniform Params {
+    uint count;
+} params;
+
+// Shared memory tile: exactly one slot per invocation in the workgroup.
+shared float shared_data[256];
+
+void main()
+{
+    uint local_index = gl_LocalInvocationID.x;        // 0 .. 255
+    uint group_index  = gl_WorkGroupID.x;             // which tile
+    uint global_index = group_index * 256u + local_index;
+
+    // Zero-pad out-of-bounds lanes so non-multiple sizes (and count == 0) are
+    // handled correctly: adding 0.0 never changes the sum.
+    float value = 0.0;
+    if (global_index < params.count) {
+        value = input_buf.data[global_index];
+    }
+    shared_data[local_index] = value;
+
+    barrier(); // every lane has written its slot before reduction begins
+
+    // Classic tree reduction: at each level the first lane of every
+    // (2*stride)-wide block accumulates the lane `stride` ahead of it,
+    // halving the number of active lanes until only lane 0 is left.
+    for (uint stride = 1u; stride < 256u; stride *= 2u) {
+        if (local_index % (2u * stride) == 0u) {
+            shared_data[local_index] += shared_data[local_index + stride];
+        }
+        barrier(); // sync between reduction levels
+    }
+
+    // Lane 0 now holds the full tile sum; emit it to this workgroup's slot.
+    if (local_index == 0u) {
+        output_buf.partial[group_index] = shared_data[0];
+    }
+}

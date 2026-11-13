@@ -1,52 +1,51 @@
 #version 450
 
-// Parallel reduction: sum of a float array
-// local_size_x = 256, tree reduction with barriers
-// Partial sums written to per-workgroup output buffer
-// Non-multiple-of-workgroup sizes handled via bounds check + zero padding
-
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
+// Input buffer: flat float array of arbitrary length
 layout(std430, binding = 0) readonly buffer InputBuffer {
     float data[];
-};
+} inputBuf;
 
+// Output buffer: one partial sum per workgroup
 layout(std430, binding = 1) writeonly buffer OutputBuffer {
     float partialSums[];
-};
+} outputBuf;
 
-// Push constants carry the true element count so we can guard OOB reads
+// Total number of elements in the input array
 layout(push_constant) uniform PushConstants {
     uint elementCount;
 } pc;
 
-// Shared memory tile — one slot per invocation in the workgroup
-shared float tile[256];
+// Shared memory for the tree reduction — one slot per lane
+shared float sdata[256];
 
 void main() {
-    uint lid   = gl_LocalInvocationID.x;   // 0..255
+    uint lid   = gl_LocalInvocationID.x;   // lane index within workgroup [0, 255]
     uint gid   = gl_GlobalInvocationID.x;  // global element index
-    uint group = gl_WorkGroupID.x;          // which workgroup we are
+    uint wgid  = gl_WorkGroupID.x;         // workgroup index
 
-    // Load from global memory, zero-pad if out of bounds
-    tile[lid] = (gid < pc.elementCount) ? data[gid] : 0.0;
+    // Load one element per lane; pad out-of-range lanes with 0.0 so the
+    // reduction is correct regardless of whether elementCount is a multiple
+    // of 256.
+    sdata[lid] = (gid < pc.elementCount) ? inputBuf.data[gid] : 0.0;
 
-    // Wait for every lane in the workgroup to finish writing to shared memory
+    // Ensure every lane has written its value before the first reduction step
     barrier();
     memoryBarrierShared();
 
-    // Tree reduction: each step halves the active lane count
-    // stride starts at 128, then 64, 32, 16, 8, 4, 2, 1
+    // Tree reduction: each step halves the active lane count.
+    // stride starts at 128 and halves each iteration until 1.
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
         if (lid < stride) {
-            tile[lid] += tile[lid + stride];
+            sdata[lid] += sdata[lid + stride];
         }
         barrier();
         memoryBarrierShared();
     }
 
-    // Lane 0 writes the workgroup partial sum to the output buffer
+    // Lane 0 holds the workgroup partial sum; write it to the output buffer.
     if (lid == 0u) {
-        partialSums[group] = tile[0];
+        outputBuf.partialSums[wgid] = sdata[0];
     }
 }

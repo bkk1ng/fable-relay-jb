@@ -1,0 +1,7 @@
+c-arena           c       FAIL    incomplete        files=1 out=476 9.9s
+c-hashtable       c       FAIL    incomplete        files=1 out=911 16.3s
+c-strbuf          c       PASS    ok                files=2 out=6007 22.4s
+cpp-threadpool    cpp     FAIL    incomplete        files=1 out=1148 12.8s
+cpp-signals       cpp     FAIL    incomplete        files=1 out=1581 27.5s
+c-lexer           c       FAIL    incomplete        files=1 out=12594 54.2s
+cpp-mmap          cpp     FAIL    incomplete        files=2 out=13118 43.0s

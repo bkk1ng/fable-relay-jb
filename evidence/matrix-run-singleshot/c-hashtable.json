@@ -1,0 +1,21 @@
+{
+ "id": "c-hashtable",
+ "lang": "c",
+ "domain": "data-structures",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. ht.h and ht.c: open-addressing string hash table (FNV-1a, linear probing, tombstones, load factor 0.7, resize by doubling). ht_new, ht_set, ht_get, ht_del, ht_free, ht_iter. sizes tracked. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "FAIL",
+ "cause": "incomplete",
+ "detail": "missing files: ht.c",
+ "stop": "tool_use",
+ "out_tokens": 16000,
+ "files": {
+  "ht.h": "/*\n * ht.h \u2014 open-addressing string hash table\n *\n * Keys: NUL-terminated strings (copied on insert).\n * Values: void * (caller-managed lifetime).\n *\n * Collision resolution : linear probing\n * Hash function        : FNV-1a (64-bit)\n * Deletion             : tombstones\n * Resize trigger       : load factor 0.7 (count / capacity), doubling\n */\n#ifndef HT_H\n#define HT_H\n\n#include <stddef.h>\n#include <stdbool.h>\n\n/* ------------------------------------------------------------------ types */\n\n/*\n * Individual table slot.  Internal; do not access fields directly.\n * key == NULL            \u2192 slot never used (probe stop)\n * key == HT_TOMBSTONE    \u2192 slot was deleted (probe continues)\n * otherwise              \u2192 live entry\n */\ntypedef struct {\n    char *key;\n    void *value;\n} ht_slot_t;\n\ntypedef struct {\n    ht_slot_t *slots;\n    size_t     count;   /* number of live entries */\n    size_t     cap;     /* total slot count, always a power of two */\n} ht_t;\n\n/*\n * Forward-cursor iterator.  Initialise with ht_iter(), step with\n * ht_iter_next().  key and value are valid until the next call to\n * ht_iter_next() or any mutating operation on the table.\n */\ntypedef struct {\n    const char *key;    /* current entry key   (read-only) */\n    void       *value;  /* current entry value (read-only) */\n    size_t      _idx;   /* private \u2014 do not touch          */\n} ht_iter_t;\n\n/* --------------------------------------------------------- public functions */\n\n/*\n * ht_new \u2014 allocate and return a new empty table.\n * Returns NULL on allocation failure.\n */\nht_t *ht_new(void);\n\n/*\n * ht_set \u2014 insert or update key \u2192 value.\n * Copies key internally; caller may free or reuse the string afterwards.\n * Returns true on success, false on allocation failure.\n */\nbool ht_set(ht_t *ht, const char *key, void *value);\n\n/*\n * ht_get \u2014 look up key.\n * Returns the associated value, or NULL if key is not present.\n */\nvoid *ht_get(const ht_t *ht, const char *key);\n\n/*\n * ht_del \u2014 remove key from the table.\n * Returns the value that was associated with key, or NULL if absent.\n * Frees the internally-copied key string.\n */\nvoid *ht_del(ht_t *ht, const char *key);\n\n/*\n * ht_free \u2014 destroy the table and free all copied key strings.\n * Values are owned by the caller and are NOT freed.\n * Safe to call with NULL.\n */\nvoid ht_free(ht_t *ht);\n\n/*\n * ht_iter \u2014 return an iterator positioned before the first entry.\n */\nht_iter_t ht_iter(const ht_t *ht);\n\n/*\n * ht_iter_next \u2014 advance the iterator to the next live entry.\n * Returns true and sets it->key / it->value on each live entry.\n * Returns false when all entries have been visited.\n */\nbool ht_iter_next(const ht_t *ht, ht_iter_t *it);\n\n#endif /* HT_H */\n"
+ },
+ "prose": "",
+ "secs": 74.5
+}

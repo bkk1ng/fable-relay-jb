@@ -1,208 +1,199 @@
-// signals.hpp — C++17 header-only, thread-safe signal/slot library
-//
-// Usage:
-//   sig::Signal<int, std::string> on_event;
-//
-//   auto conn  = on_event.connect([](int n, std::string s){ ... });
-//   auto scoped = sig::ScopedConnection{ on_event.connect([](int n, std::string){}) };
-//
-//   on_event.emit(42, "hello");   // thread-safe from any thread
-//   conn.disconnect();            // explicit removal
-//   // scoped disconnects automatically at end of scope
-//
-// Thread-safety contract
-//   • emit() copies the slot list under the lock, then calls slots
-//     without holding it — re-entrant safe and deadlock-free.
-//   • connect/disconnect/emit may be called concurrently from any thread.
-//   • A single Connection object must NOT be shared across threads
-//     (owns its own connected_ flag without synchronisation).
-
 #pragma once
 
+// signals.hpp — header-only, C++17, thread-safe signal/slot library
+//
+// Copy-on-emit strategy: emit() snapshots the slot list under a lock,
+// then iterates the snapshot without holding the lock. connect() and
+// disconnect() always replace (never mutate) the shared slot vector,
+// so an in-flight emit iteration is never invalidated.
+//
+// Build: any C++17-capable compiler; link with -pthread on Linux/macOS.
+
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <utility>
 #include <vector>
 
-namespace sig {
+namespace signals {
 
-// Forward declaration so Connection can friend all specialisations.
-template <typename...>
-class Signal;
+// ── internal ──────────────────────────────────────────────────────────────────
+
+namespace detail {
+
+using SlotId = std::uint64_t;
+
+/// Monotonically increasing, process-unique slot identifier.
+inline SlotId next_id() noexcept {
+    static std::atomic<SlotId> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+} // namespace detail
 
 // ── Connection ────────────────────────────────────────────────────────────────
-//
-// Returned by Signal::connect(). Move-only.
-// Calling disconnect() removes the slot; a no-op if already disconnected or
-// if the originating Signal has been destroyed.
+
+/// Lightweight handle returned by Signal::connect().
+/// Calling disconnect() unregisters the slot; subsequent calls are no-ops.
+/// A default-constructed Connection is already in the disconnected state.
 class Connection {
 public:
-    Connection() = default;
+    Connection() noexcept = default;
 
-    Connection(const Connection&)            = delete;
-    Connection& operator=(const Connection&) = delete;
-
-    Connection(Connection&& o) noexcept
-        : eraser_(std::move(o.eraser_))
-        , id_(o.id_)
-        , connected_(o.connected_)
-    {
-        o.connected_ = false;
+    /// Unregister the slot.  Safe to call multiple times and from any thread.
+    void disconnect() {
+        if (auto fn = disconnect_fn_.lock()) {
+            (*fn)(id_);
+            disconnect_fn_.reset(); // make subsequent calls cheap no-ops
+        }
     }
 
-    Connection& operator=(Connection&& o) noexcept {
+    /// Returns false once disconnected or once the owning Signal is destroyed.
+    [[nodiscard]] bool connected() const noexcept {
+        return !disconnect_fn_.expired();
+    }
+
+private:
+    template<typename...>
+    friend class Signal;
+
+    // The callable that removes this id from the slot list.
+    // Owned by Signal; shared among all Connections for that Signal instance.
+    using DisconnectFn = std::function<void(detail::SlotId)>;
+
+    Connection(detail::SlotId id, std::weak_ptr<DisconnectFn> fn) noexcept
+        : id_(id), disconnect_fn_(std::move(fn)) {}
+
+    detail::SlotId id_{0};
+    std::weak_ptr<DisconnectFn> disconnect_fn_;
+};
+
+// ── ScopedConnection ──────────────────────────────────────────────────────────
+
+/// RAII wrapper: disconnects automatically on destruction.
+/// Non-copyable, movable.
+class ScopedConnection {
+public:
+    ScopedConnection() noexcept = default;
+
+    explicit ScopedConnection(Connection c) noexcept : conn_(std::move(c)) {}
+
+    ~ScopedConnection() { conn_.disconnect(); }
+
+    ScopedConnection(const ScopedConnection&) = delete;
+    ScopedConnection& operator=(const ScopedConnection&) = delete;
+
+    ScopedConnection(ScopedConnection&& o) noexcept : conn_(std::move(o.conn_)) {}
+
+    ScopedConnection& operator=(ScopedConnection&& o) noexcept {
         if (this != &o) {
-            disconnect();              // drop any existing connection first
-            eraser_      = std::move(o.eraser_);
-            id_          = o.id_;
-            connected_   = o.connected_;
-            o.connected_ = false;
+            conn_.disconnect();
+            conn_ = std::move(o.conn_);
         }
         return *this;
     }
 
-    ~Connection() = default;   // does NOT auto-disconnect — use ScopedConnection
-
-    void disconnect() noexcept {
-        if (connected_) {
-            if (eraser_) eraser_(id_);
-            connected_ = false;
-        }
-    }
-
-    [[nodiscard]] bool connected() const noexcept { return connected_; }
-
-private:
-    // Only Signal<Args...> constructs non-empty Connections.
-    template <typename...>
-    friend class Signal;
-
-    using EraserFn = std::function<void(uint64_t)>;
-
-    Connection(EraserFn eraser, uint64_t id)
-        : eraser_(std::move(eraser)), id_(id), connected_(true) {}
-
-    EraserFn eraser_;
-    uint64_t id_        = 0;
-    bool     connected_ = false;
-};
-
-// ── ScopedConnection ──────────────────────────────────────────────────────────
-//
-// RAII wrapper: automatically calls disconnect() when it goes out of scope.
-class ScopedConnection {
-public:
-    ScopedConnection() = default;
-    explicit ScopedConnection(Connection c) : conn_(std::move(c)) {}
-
-    ~ScopedConnection() { conn_.disconnect(); }
-
-    ScopedConnection(const ScopedConnection&)            = delete;
-    ScopedConnection& operator=(const ScopedConnection&) = delete;
-
-    ScopedConnection(ScopedConnection&&)            = default;
-    ScopedConnection& operator=(ScopedConnection&&) = default;
-
-    void disconnect() noexcept              { conn_.disconnect(); }
+    void disconnect()                       { conn_.disconnect(); }
     [[nodiscard]] bool connected() const noexcept { return conn_.connected(); }
-
-    // Transfer ownership so the slot is NOT disconnected on destruction.
-    [[nodiscard]] Connection release() { return std::move(conn_); }
 
 private:
     Connection conn_;
 };
 
 // ── Signal ────────────────────────────────────────────────────────────────────
-//
-// All public methods are thread-safe.
-// The Signal may be destroyed while Connections that came from it are still
-// alive: calling disconnect() on a stale Connection is a safe no-op.
-template <typename... Args>
-class Signal {
-public:
-    using SlotFn = std::function<void(Args...)>;
 
+/// Thread-safe signal.  Multiple threads may call emit(), connect(), and
+/// disconnect() concurrently without external synchronisation.
+///
+/// emit() passes its arguments by value to each slot, so every slot in a
+/// given emit call receives the same values regardless of what other slots do.
+///
+/// Non-copyable and non-movable: Connection objects hold a weak reference
+/// into this instance's internals and must not be silently invalidated.
+template<typename... Args>
+class Signal {
+    using Fn  = std::function<void(Args...)>;
+
+    struct Slot {
+        detail::SlotId id;
+        Fn             fn;
+    };
+
+    using SlotVec = std::vector<Slot>;
+
+    // Shared mutable state.  Accessed only under mutex.
+    struct State {
+        mutable std::mutex             mutex;
+        // Always replaced, never mutated; emit() holds its own shared_ptr.
+        std::shared_ptr<const SlotVec> slots{std::make_shared<SlotVec>()};
+    };
+
+    // state_ must be declared before disconnect_fn_ so NSDMI order is correct.
+    std::shared_ptr<State> state_{std::make_shared<State>()};
+
+    // The erase-by-id callable shared with every Connection for this Signal.
+    // When Signal is destroyed, this shared_ptr is released; all Connection
+    // weak_ptrs expire and connected() correctly returns false.
+    std::shared_ptr<Connection::DisconnectFn> disconnect_fn_{
+        std::make_shared<Connection::DisconnectFn>(
+            [weak = std::weak_ptr<State>(state_)](detail::SlotId id) {
+                auto s = weak.lock();
+                if (!s) return; // signal already destroyed
+                std::lock_guard<std::mutex> lk(s->mutex);
+                // Copy-on-write: build a new vector without 'id', then swap.
+                auto next = std::make_shared<SlotVec>(*s->slots);
+                next->erase(
+                    std::remove_if(next->begin(), next->end(),
+                        [id](const Slot& slot) { return slot.id == id; }),
+                    next->end());
+                s->slots = std::move(next);
+            })};
+
+public:
     Signal()  = default;
     ~Signal() = default;
 
     Signal(const Signal&)            = delete;
     Signal& operator=(const Signal&) = delete;
+    Signal(Signal&&)                 = delete;
+    Signal& operator=(Signal&&)      = delete;
 
-    // Movable: existing Connections remain valid after a move because they
-    // hold a weak_ptr into the heap-allocated State, not into the Signal object.
-    Signal(Signal&&)            = default;
-    Signal& operator=(Signal&&) = default;
-
-    // ── connect ───────────────────────────────────────────────────────────────
-    [[nodiscard]] Connection connect(SlotFn slot) {
-        const uint64_t id = state_->next_id.fetch_add(1, std::memory_order_relaxed);
+    /// Register a slot.  Returns a Connection handle for later disconnection.
+    [[nodiscard]] Connection connect(Fn fn) {
+        const auto id = detail::next_id();
         {
-            std::lock_guard<std::mutex> lk(state_->mtx);
-            state_->slots.push_back({id, std::move(slot)});
+            std::lock_guard<std::mutex> lk(state_->mutex);
+            auto next = std::make_shared<SlotVec>(*state_->slots);
+            next->push_back({id, std::move(fn)});
+            state_->slots = std::move(next);
         }
-        // The eraser captures a weak_ptr so it safely no-ops after Signal
-        // destruction; it does not extend the Signal's lifetime.
-        std::weak_ptr<State> weak = state_;
-        return Connection{
-            [weak](uint64_t remove_id) {
-                if (auto s = weak.lock()) {
-                    s->remove(remove_id);
-                }
-            },
-            id
-        };
+        return Connection{id, disconnect_fn_};
     }
 
-    // ── disconnect (free-function style convenience) ──────────────────────────
-    static void disconnect(Connection& c) noexcept { c.disconnect(); }
+    /// Convenience overload: disconnect via a Connection handle.
+    void disconnect(Connection& c) { c.disconnect(); }
 
-    // ── emit ──────────────────────────────────────────────────────────────────
-    // Copy-on-emit: snapshot the slot list under the lock, then invoke outside
-    // the lock. Slots added or removed during emission affect subsequent emits
-    // but not the current one.
-    void emit(Args... args) {
-        // Take a copy so we don't hold the lock while calling user code.
-        std::vector<Entry> snapshot;
+    /// Invoke all currently registered slots with copies of the arguments.
+    /// Safe to call concurrently with other emit(), connect(), or disconnect()
+    /// calls.  A slot that calls disconnect() on itself or a sibling during
+    /// emit will not affect the in-flight snapshot.
+    void emit(Args... args) const {
+        // Grab an immutable snapshot while holding the lock, then drop it.
+        std::shared_ptr<const SlotVec> snapshot;
         {
-            std::lock_guard<std::mutex> lk(state_->mtx);
-            snapshot = state_->slots;          // copies std::function objects
+            std::lock_guard<std::mutex> lk(state_->mutex);
+            snapshot = state_->slots;
         }
-        for (auto& e : snapshot) {
-            e.fn(args...);                     // value args: safe to call N times
+        // Iterate without the lock; snapshot is immutable.
+        for (const auto& slot : *snapshot) {
+            slot.fn(args...); // pass by value — no forwarding-in-loop hazard
         }
     }
 
-    // ── slot_count ────────────────────────────────────────────────────────────
-    [[nodiscard]] std::size_t slot_count() const noexcept {
-        std::lock_guard<std::mutex> lk(state_->mtx);
-        return state_->slots.size();
-    }
-
-private:
-    struct Entry {
-        uint64_t id;
-        SlotFn   fn;
-    };
-
-    struct State {
-        mutable std::mutex       mtx;
-        std::vector<Entry>       slots;
-        std::atomic<uint64_t>    next_id{0};
-
-        void remove(uint64_t id) {
-            std::lock_guard<std::mutex> lk(mtx);
-            auto it = std::find_if(slots.begin(), slots.end(),
-                                   [id](const Entry& e) { return e.id == id; });
-            if (it != slots.end()) slots.erase(it);
-        }
-    };
-
-    // Heap-allocated so Connections outlive a moved-from Signal safely.
-    std::shared_ptr<State> state_ = std::make_shared<State>();
+    /// Syntactic sugar: sig(args...) == sig.emit(args...).
+    void operator()(Args... args) const { emit(std::forward<Args>(args)...); }
 };
 
-} // namespace sig
+} // namespace signals

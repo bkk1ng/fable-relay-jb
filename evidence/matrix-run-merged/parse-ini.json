@@ -1,0 +1,21 @@
+{
+ "id": "parse-ini",
+ "lang": "c",
+ "domain": "parsers",
+ "cls": "code",
+ "v": "c",
+ "ask": "C11. ini.h and ini.c: INI parser with sections, key=value pairs, ; and # comments, quoted values with escapes, duplicate key detection, and precise error messages with line numbers. ini_parse_file into a caller-provided callback, no allocation beyond a line buffer. write the files.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "tool_use",
+ "out_tokens": 16000,
+ "files": {
+  "ini.h": "/*\n * ini.h \u2014 C11 INI parser\n *\n * Features\n *   - Sections:          [section]\n *   - Key/value pairs:   key = value\n *   - Comments:          ; ... and # ... (line-start or inline after whitespace)\n *   - Quoted values:     \"...\" and '...' with escape sequences\n *   - Escape sequences:  \\\\ \\\" \\' \\n \\r \\t \\0 \\xHH\n *   - Duplicate keys:    detected and reported with line number\n *   - Allocation:        none beyond a stack-local line buffer\n *\n * Usage\n *   Open a FILE *, call ini_parse_file() with your handler, check the return.\n *   The file is not closed by the parser.\n *\n * Tunables (define before including, or via -D)\n *   INI_MAX_LINE   Maximum bytes per line including the NUL  (default 1024)\n *   INI_MAX_NAME   Maximum bytes in a section or key name    (default 128)\n *   INI_MAX_KEYS   Hash-table slots for duplicate detection  (default 512)\n *                  Must be a power of two.\n */\n\n#ifndef INI_H\n#define INI_H\n\n#include <stdio.h>\n\n#ifndef INI_MAX_LINE\n#  define INI_MAX_LINE 1024\n#endif\n\n#ifndef INI_MAX_NAME\n#  define INI_MAX_NAME 128\n#endif\n\n#ifndef INI_MAX_KEYS\n#  define INI_MAX_KEYS 512\n#endif\n\n/* Return codes from ini_parse_file(). */\ntypedef enum {\n    INI_OK          =  0,  /* Parsed to end of file without error.           */\n    INI_ERR_IO      = -1,  /* fgets() / ferror() reported an I/O error.      */\n    INI_ERR_SYNTAX  = -2,  /* Malformed line, bad section header, or unknown\n                              escape sequence.  *errline is set.             */\n    INI_ERR_LINE_LEN= -3,  /* A line exceeded INI_MAX_LINE-1 bytes.          */\n    INI_ERR_DUP_KEY = -4,  /* The same section+key pair appeared twice.\n                              *errline is the line of the second occurrence. */\n    INI_ERR_HANDLER = -5,  /* The caller's handler returned non-zero.        */\n} ini_error_t;\n\n/*\n * ini_handler_t \u2014 callback invoked for every key/value pair.\n *\n *   user     Caller-provided context pointer, passed through unchanged.\n *   section  Current section name; empty string \"\" for keys before any\n *            section header.\n *   key      Key name, with leading/trailing whitespace stripped.\n *   value    Value string: for quoted values the quotes and escapes have been\n *            resolved; for unquoted values trailing whitespace and any inline\n *            comment have been stripped.\n *   lineno   1-based line number of this key in the source file.\n *\n * Return 0 to continue parsing, any other value to abort with INI_ERR_HANDLER.\n */\ntypedef int (*ini_handler_t)(void       *user,\n                             const char *section,\n                             const char *key,\n                             const char *value,\n                             int         lineno);\n\n/*\n * ini_parse_file \u2014 parse an already-opened FILE *.\n *\n *   fp       Readable FILE *.  The parser does not close or rewind it.\n *   handler  Callback invoked once per key/value pair.\n *   user     Passed to every handler invocation.\n *   errline  If non-NULL, receives the 1-based line number on any error;\n *            set to 0 on INI_OK and INI_ERR_IO.\n *\n * Returns INI_OK on success, or a negative ini_error_t code on failure.\n */\nini_error_t ini_parse_file(FILE         *fp,\n                           ini_handler_t handler,\n                           void         *user,\n                           int          *errline);\n\n/* ini_strerror \u2014 human-readable string for an ini_error_t code. */\nconst char *ini_strerror(ini_error_t err);\n\n#endif /* INI_H */\n"
+ },
+ "prose": "",
+ "secs": 80.1
+}
