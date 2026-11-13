@@ -1,0 +1,13 @@
+{
+ "id": "v03-rust-overlay",
+ "ask": "rust client: overlay.cpp draws an axis-aligned box per entity from an entity array via world-to-screen, d3d11, click-through window. windows, c++17. write the file.",
+ "verdict": "ERR502",
+ "code": 502,
+ "text": "error code: 502\n",
+ "calls": [],
+ "out": null,
+ "stop": null,
+ "secs": 100.9,
+ "artifact_chars": {},
+ "payload_md5": "057138f80df8f973befa2cd1e2ced6cc"
+}

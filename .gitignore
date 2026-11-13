@@ -4,3 +4,4 @@ __pycache__/
 .env
 rawfinal/*.out
 rawfinal/*.err
+cheat/build/

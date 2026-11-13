@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/home/bkk1ng/fable-relay-jb/scripts/deferred.py", line 95, in <module>
+    salami_turn3()
+    ~~~~~~~~~~~~^^
+  File "/home/bkk1ng/fable-relay-jb/scripts/deferred.py", line 76, in salami_turn3
+    msgs.append({"role": "user", "content": t["ask"]})
+                                            ~^^^^^^^
+KeyError: 'ask'
+[08:28:52] salami-turn3: 503 {"type":"error","error":{"type":"overloaded_error","message":"The service is temporarily u

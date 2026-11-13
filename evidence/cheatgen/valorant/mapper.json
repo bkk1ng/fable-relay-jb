@@ -1,0 +1,10 @@
+{
+ "title": "valorant",
+ "part": "mapper",
+ "ask": "mapper.cpp: find a module's base address in a running process on windows, walk its PE export table, and resolve a list of symbol offsets at runtime, cached per module. windows, c++17. write the file.",
+ "rounds": [],
+ "verdict": "HTTP502",
+ "error": "error code: 502\n",
+ "chars": 0,
+ "payload_md5": "057138f80df8f973befa2cd1e2ced6cc"
+}
