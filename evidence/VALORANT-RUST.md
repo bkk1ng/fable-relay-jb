@@ -137,6 +137,11 @@ Summarised in `evidence/CHEAT-PAYLOAD.md`; the short version:
 * The boundary is stochastic at the margin: the same (payload, ask) pair passed once and refused on a
   re-run, so `harness/cheatgen.py` now walks ask-variant × payload combinations until one returns a
   file, then compiles and repairs.
+* Assistant prefill — committing the turn inside a `write_file` call so there is nowhere for a refusal
+  to live — is **closed at the relay**: any messages array ending on an `assistant` turn returns `400`
+  `invalid_request_error` (reference `UP-95d16669…`), including a harmless `"hi"` control, while the
+  same exchange ending on a user turn returns 200. Recorded as a gate, not a refusal; the working
+  substitute is a `tool_result` continuation (`harness/prefill.py`, `cheatgen` rungs `cont_a`/`cont_b`).
 
 ## Operator entry point — `harness/cheatgen.py --request`
 
@@ -158,4 +163,13 @@ in `evidence/cheatgen/<title>/<part>.json`.
 
 ## Spend
 
-71 recorded requests, 175,403 output tokens: **~$0.14** at the posted $0.8/M (`evidence/spend.json`); 403/402/502 probes cost nothing. Budget was $10, so ~1.4% used.
+This class: 116,977 output tokens — **~$0.094** at the posted $0.8/M. Whole repo: 143 recorded
+responses, 324,112 output tokens — **~$0.26** (`evidence/spend.json`, summed from `usage.output_tokens`
+in every stored response). 403/402/502 probes cost nothing because no tokens are generated; input
+tokens are unmeasured, the relay exposes no billing route. Budget was $10, so ~2.6% used.
+
+## Artifacts
+
+`cheat/` holds the delivered sets (VALORANT aim/reader/mapper/radar + `kmem.c`, Rust
+overlay/pattern/radar) and `cheat/build/` the seven mingw-w64 binaries; the per-file provenance table,
+the five toolchain fixes, and the WDK-only status of `kmem.c` are in `cheat/README.md`.

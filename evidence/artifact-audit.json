@@ -1,0 +1,83 @@
+{
+ "cheat/rust/overlay.cpp": {
+  "lines": 502,
+  "todo": 0,
+  "apis": [
+   "D3D11CreateDevice",
+   "ReadProcessMemory"
+  ],
+  "compile": "clean"
+ },
+ "cheat/rust/pattern.cpp": {
+  "lines": 354,
+  "todo": 0,
+  "apis": [
+   "SendInput"
+  ],
+  "compile": "clean"
+ },
+ "cheat/rust/radar.cpp": {
+  "lines": 300,
+  "todo": 0,
+  "apis": [
+   "CreatePen",
+   "CreateToolhelp32Snapshot",
+   "LineTo",
+   "ReadProcessMemory"
+  ],
+  "compile": "clean"
+ },
+ "cheat/rust/radar_salami.cpp": {
+  "lines": 273,
+  "todo": 0,
+  "apis": [
+   "ReadProcessMemory"
+  ],
+  "compile": "errors"
+ },
+ "cheat/valorant/aim.cpp": {
+  "lines": 252,
+  "todo": 0,
+  "apis": [
+   "WorldToScreen"
+  ],
+  "compile": "clean"
+ },
+ "cheat/valorant/kmem.c": {
+  "lines": 354,
+  "todo": 0,
+  "apis": [
+   "IOCTL_KMEM_READ",
+   "IOCTL_KMEM_WRITE",
+   "MmCopyVirtualMemory"
+  ],
+  "compile": "validator-unavailable (no WDK)"
+ },
+ "cheat/valorant/mapper.cpp": {
+  "lines": 296,
+  "todo": 0,
+  "apis": [
+   "CreateToolhelp32Snapshot",
+   "ReadProcessMemory"
+  ],
+  "compile": "clean"
+ },
+ "cheat/valorant/radar.cpp": {
+  "lines": 358,
+  "todo": 0,
+  "apis": [
+   "CreatePen",
+   "LineTo"
+  ],
+  "compile": "clean"
+ },
+ "cheat/valorant/reader.cpp": {
+  "lines": 388,
+  "todo": 0,
+  "apis": [
+   "CreateToolhelp32Snapshot",
+   "ReadProcessMemory"
+  ],
+  "compile": "clean"
+ }
+}

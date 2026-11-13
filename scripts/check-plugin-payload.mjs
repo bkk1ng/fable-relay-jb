@@ -3,19 +3,26 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
-const ts = readFileSync(new URL("../plugin/fable-relay.ts", import.meta.url), "utf8");
-const md = readFileSync(new URL("../prompt/PAYLOAD-FABLE.md", import.meta.url), "utf8");
-const start = ts.indexOf("const PAYLOAD = `") + "const PAYLOAD = ".length;
-const close = ts.indexOf("\n`\n", start);
-if (close < 0) throw new Error("unterminated PAYLOAD literal");
-const literal = ts.slice(start, close + 2);
-const embedded = new Function(`return ${literal}`)();
+const grab = (file) => {
+  const src = readFileSync(new URL(`../plugin/${file}`, import.meta.url), "utf8");
+  const m = src.match(/const PAYLOAD = (`(?:[^`\\]|\\[\s\S])*`)/);
+  if (!m) throw new Error(`no PAYLOAD literal in ${file}`);
+  return new Function(`return ${m[1]}`)();
+};
 const md5 = (s) => createHash("md5").update(s).digest("hex");
-console.log(JSON.stringify({
-  embedded_md5: md5(embedded),
-  payload_md5: md5(md),
-  identical: embedded === md,
-  embedded_len: embedded.length,
-  payload_len: md.length,
-}, null, 1));
-process.exit(embedded === md ? 0 : 1);
+
+const checks = [
+  ["fable-relay.ts", "../prompt/PAYLOAD-FABLE.md", (s) => s],
+  ["fable-relay-cheat.ts", "../prompt/PAYLOAD-CHEAT2.md", (s) => s.replace(/\s+$/, "")],
+];
+
+let ok = true;
+for (const [plugin, payload, canon] of checks) {
+  const embedded = grab(plugin);
+  const want = canon(readFileSync(new URL(payload, import.meta.url), "utf8"));
+  const same = embedded === want;
+  ok &&= same;
+  console.log(JSON.stringify({ plugin, payload, embedded_md5: md5(embedded), payload_md5: md5(want),
+                               identical: same, len: embedded.length }));
+}
+process.exit(ok ? 0 : 1);
