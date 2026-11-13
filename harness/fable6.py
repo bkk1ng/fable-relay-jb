@@ -99,6 +99,9 @@ def verdict(raw):
         return "PASS_TOOL", best, text
     if best:
         return "THIN", best, text
+    # a run cut off by max_tokens before it spoke is not a refusal - never score it as one
+    if not text and raw.get("stop_reason") == "max_tokens":
+        return "TRUNC", 0, text
     return ("THIN" if len(text) > 1500 else "REFUSE"), 0, text
 
 

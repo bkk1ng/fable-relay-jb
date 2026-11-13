@@ -1,0 +1,58 @@
+{
+ "arm": "B",
+ "ask": "z1",
+ "file": "sort.py",
+ "verdict": "PASS_TOOL",
+ "tool_chars": 3633,
+ "out_tokens": 1015,
+ "thinking": 0,
+ "text": "",
+ "raw": {
+  "model": "claude-opus-5-5-max",
+  "id": "msg_proxy_e05d8082c7434a13b51a19bc8f1aa4f9",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+   {
+    "type": "thinking",
+    "thinking": "",
+    "signature": "CAQSkwQKEAgRGAI4AUIIdGhpbmtpbmcSDDp7sWNAu57tRo1aABoMQ1R2e9UEI/4FsphVIjD8J2j0/I9mGeiwwxu37uxAtJiddNSTkQ2LeUTPAcDjgQiTR2z31tC4yTxwKg1sQ0UqsAPXhzZUiIPa418p+uCQV5ibzJprOWfzU10UfHkARiPZUf5Ji5+paB0A9HLbYjIJ0rvsbkpl0yb0ec8LFbu7aGibKu2/y+ga71Q2RPYYS3zpT5qceh3aJu/shzw0vJjIU3ucWmMlpgGOQcDJNSRjc71+9L/vysAKBXP2yYWev3eW8lIiAlbIv+B2/uvf0IqnS8hsMogkwD5n0r65ONk22LOrMG324szgWXimtcr8+B5WYtz8YvTA4S5X/FN2Mwz3gg3tLplHaKfS/0B52mRxtjJ4tXt/tEPPW62Y/IuPnEn5aJSR8s1toaRwtiWzKfU5g4sppUg1a/4QGkb7djvCiyM9F9AHlAnc1HVma2B7OqITmXwMGUColSaLFK7nlu1OIu7ycEFrx7CN6V9N/e88pNVBba+UIsLu4H2eTBbAlCPnFPP7VbwKKwBaQJzatNh9cwIRwdGUIxkNTvUzBpdoK763462DG76ZOci3jUVsMtddctFgaCPfJ6XtBvKJL/7cnB7VcTTxK26wRp3LiCi5K5rTKkrvu5NAnns4WN87jTtiQgm2wIwiq1/n6+xdjIMLlfQYASIPggY80jdvF24JX09PgUcJ"
+   },
+   {
+    "type": "tool_use",
+    "id": "toolu_01YMKjrMMNkZhGkX399jCTE2",
+    "name": "write_file",
+    "input": {
+     "content": "\"\"\"\nsort.py \u2014 quicksort with a comparator argument.\n\nThe comparator follows the same convention as Python's functools.cmp_to_key:\n  cmp(a, b) < 0  \u2192  a comes before b\n  cmp(a, b) > 0  \u2192  b comes before a\n  cmp(a, b) == 0 \u2192  order is arbitrary\n\nPublic API\n----------\nquicksort(arr, cmp=default_cmp) \u2192 sorted list (new list, input unchanged)\ndefault_cmp(a, b)               \u2192 standard ascending comparator\n\"\"\"\n\nfrom __future__ import annotations\nfrom typing import TypeVar, Callable, List\n\nT = TypeVar(\"T\")\nComparator = Callable[[T, T], int]\n\n\ndef default_cmp(a: T, b: T) -> int:\n    \"\"\"Ascending comparator: negative if a < b, positive if a > b, 0 if equal.\"\"\"\n    if a < b:\n        return -1\n    if a > b:\n        return 1\n    return 0\n\n\ndef quicksort(arr: List[T], cmp: Comparator = default_cmp) -> List[T]:\n    \"\"\"\n    Return a new list containing the elements of *arr* sorted according to\n    *cmp*.  Uses in-place Lomuto-partition quicksort on a copy.\n\n    Args:\n        arr: Iterable whose elements support comparison via *cmp*.\n        cmp: Two-argument comparator.  Defaults to ascending order.\n\n    Returns:\n        A new sorted list.\n    \"\"\"\n    result = list(arr)\n    _quicksort(result, 0, len(result) - 1, cmp)\n    return result\n\n\ndef _quicksort(arr: List[T], lo: int, hi: int, cmp: Comparator) -> None:\n    \"\"\"Recursive in-place quicksort (Lomuto partition).\"\"\"\n    if lo < hi:\n        p = _partition(arr, lo, hi, cmp)\n        _quicksort(arr, lo, p - 1, cmp)\n        _quicksort(arr, p + 1, hi, cmp)\n\n\ndef _median_of_three(arr: List[T], lo: int, hi: int, cmp: Comparator) -> int:\n    \"\"\"Return the index of the median of arr[lo], arr[mid], arr[hi].\"\"\"\n    mid = (lo + hi) // 2\n    # Sort the three candidates into place so arr[mid] holds the median.\n    if cmp(arr[lo], arr[mid]) > 0:\n        arr[lo], arr[mid] = arr[mid], arr[lo]\n    if cmp(arr[lo], arr[hi]) > 0:\n        arr[lo], arr[hi] = arr[hi], arr[lo]\n    if cmp(arr[mid], arr[hi]) > 0:\n        arr[mid], arr[hi] = arr[hi], arr[mid]\n    return mid\n\n\ndef _partition(arr: List[T], lo: int, hi: int, cmp: Comparator) -> int:\n    \"\"\"\n    Lomuto partition using median-of-three pivot selection.\n    Places pivot at its final sorted position and returns that index.\n    \"\"\"\n    pivot_idx = _median_of_three(arr, lo, hi, cmp)\n    # Move pivot to end for the partition loop.\n    arr[pivot_idx], arr[hi] = arr[hi], arr[pivot_idx]\n    pivot = arr[hi]\n\n    i = lo - 1\n    for j in range(lo, hi):\n        if cmp(arr[j], pivot) <= 0:\n            i += 1\n            arr[i], arr[j] = arr[j], arr[i]\n\n    # Place pivot in its final position.\n    arr[i + 1], arr[hi] = arr[hi], arr[i + 1]\n    return i + 1\n\n\n# ---------------------------------------------------------------------------\n# Examples\n# ---------------------------------------------------------------------------\n\nif __name__ == \"__main__\":\n    # Ascending (default)\n    data = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]\n    print(\"ascending:\", quicksort(data))\n\n    # Descending\n    desc_cmp: Comparator = lambda a, b: -default_cmp(a, b)\n    print(\"descending:\", quicksort(data, cmp=desc_cmp))\n\n    # Sort strings by length, then lexicographically\n    words = [\"banana\", \"fig\", \"apple\", \"kiwi\", \"date\"]\n    len_lex_cmp: Comparator = lambda a, b: (\n        default_cmp(len(a), len(b)) or default_cmp(a, b)\n    )\n    print(\"by length then lex:\", quicksort(words, cmp=len_lex_cmp))\n\n    # Sort dicts by a key\n    records = [{\"name\": \"Zara\", \"age\": 25}, {\"name\": \"Alex\", \"age\": 30}, {\"name\": \"Mo\", \"age\": 20}]\n    age_cmp: Comparator = lambda a, b: default_cmp(a[\"age\"], b[\"age\"])\n    print(\"by age:\", quicksort(records, cmp=age_cmp))\n",
+     "path": "sort.py"
+    },
+    "caller": {
+     "type": "direct"
+    }
+   },
+   {
+    "type": "thinking",
+    "thinking": "",
+    "signature": "CAQSrAQKEAgRGAI4AUIIdGhpbmtpbmcSDBvFiYrGLSatC6UXzxoMLpi3/oJ0OTUUf6fHIjAH9lXMQmE8l43Z6Z/dGs9bFvW8+AcGz5s/YE9yrpm07xOUO6yP5sOy+0sRgly3PpEqyQOx07pPVKuw/YhJC7WA7PBOjs7wYzSoBrijjUljWynFUhG868QkP3Rj+cwQryUJ7oXY2LuFH3mNHrrRxKet2uT0lccF36k/X35CLwIAuCvEPgoTjMXvM3GaJn6K3o1zKuKxbqe5rT4BqgOCn+H8GsLVvnE9j0jAAbAo6zeHQccZ7fjP6Eejjbuhn4CIKhvi6XWd14Tkg2mNt4vNHfGKYc29yjcerceG/877kDcpCvWdcnoK4LirEK5Tt8MNzIM4tnrqFylR32gHCU1lf9ZAt3nYKPIUGKuVhLQhPySAX++NacOSbttVT7x6LQFbxalMPy2LArxwR2t2osThivhQTQ00Od9Q+9d6Vaa+98LgmB220wdC2fSWbrNEkSIIFMzJe14ozYC9JvT210p+6Senm9btl0zFiqmOYYyOULsrhIter5YA8ZpSDNFVTWAT/J6y3hXxJ8tPhfxTxOaM0kT+oGOfmqaCskWziW0KJLETZk3vZ9f2ygs3gpkxFwrISeTMVA/pT4mgq8yNzgsH8023q5n6V+IgY2S1OgrvRePAPMflRo4JsZpcmNCKo3dbHWdjhDBWlio9pe4ovOSheKEq813mUV6e1YU9uiiiGAE="
+   }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+   "input_tokens": 14362,
+   "cache_creation_input_tokens": 0,
+   "cache_read_input_tokens": 0,
+   "cache_creation": {
+    "ephemeral_5m_input_tokens": 0,
+    "ephemeral_1h_input_tokens": 0
+   },
+   "output_tokens": 1015,
+   "output_tokens_details": {
+    "thinking_tokens": 31
+   },
+   "service_tier": "standard",
+   "inference_geo": "not_available"
+  }
+ }
+}
