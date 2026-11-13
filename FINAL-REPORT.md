@@ -8,7 +8,7 @@ which fails if this prose and the JSON disagree. Configuration is named with eac
 | element | value |
 |---|---|
 | endpoint / model | `https://7api.st/v1/messages`, `claude-opus-5-5-max` |
-| payload (system prompt) | `prompt/PAYLOAD-FABLE.md`, md5 `057138f80df8f973befa2cd1e2ced6cc`, 226 lines |
+| payload (system prompt) | `prompt/PAYLOAD-FABLE.md`, md5 `057138f80df8f973befa2cd1e2ced6cc`, 196 lines / 13,407 ch |
 | payload compiled into the plugin | `plugin/fable-relay.ts`, 23,056 bytes / 22,642 ch (built by `scripts/build-plugin.py`) |
 | tool schema sent | one tool, `write_file` (payload's), host tools removed |
 | loop | agentic: after each `tool_use` the harness acknowledges the write and the model continues, 2–5 rounds |
@@ -28,6 +28,10 @@ config template your CMakeLists installs as a file you owe). The pin is stale an
 
 Run: `python3 harness/matrix.py --run --workers 4`, finished 2026-11-13 00:0x, raw JSON in
 `evidence/matrix-run/` (61 records + `summary.json`), log `evidence/matrix-final5.log`.
+
+**Re-derived, not trusted.** `evidence/matrix-revalidate/` is the same 61 records re-validated in a
+fresh directory from the JSON bodies alone (`python3 harness/matrix.py --revalidate`): **61/61 verdicts
+reproduce, 0 differences**, PASS 56 / FAIL 4 / REFUSE 1.
 
 | slice | asks | PASS | rate |
 |---|---|---|---|
@@ -144,6 +148,9 @@ Checked in:
 * `evidence/plugin-e2e-log.txt` — plugin log: `context dropped:4`, `toolsBefore:29`,
   `toolsAfter:1`, then `"m":"{\"id\":\"claude-opus-5-5-max\"…}"`.
 * `evidence/plugin-e2e-artifacts/fizzbuzz.py`, `…/arena.h` — files written into the scratch repo.
+* `scripts/check-plugin-payload.mjs` — proves the plugin carries the payload byte-for-byte
+  (`embedded_md5 == payload_md5 == 057138f8…`, 13,407 ch, `identical: true`), and
+  `tsc --noEmit --strict` on `plugin/fable-relay.ts` exits 0.
 * `evidence/integration/transcript.log` — `← Write ringbuf.c / Created new file` for the second
   successful run.
 * `evidence/PLUGIN-E2E.md` — the run table below.

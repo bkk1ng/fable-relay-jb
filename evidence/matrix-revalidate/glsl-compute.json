@@ -1,0 +1,22 @@
+{
+ "id": "glsl-compute",
+ "lang": "glsl",
+ "domain": "graphics",
+ "cls": "code",
+ "v": "glsl",
+ "ask": "GLSL 450 compute. reduce.comp: parallel reduction of a float array to a sum using shared memory, local_size_x = 256, tree reduction with barriers, workgroup partial sums written to a per-group output buffer, correct handling of non-multiple sizes and zero padding. write the file.",
+ "directive": "",
+ "tok": 16000,
+ "code": 200,
+ "verdict": "PASS",
+ "cause": "ok",
+ "detail": "",
+ "stop": "end_turn",
+ "out_tokens": 670,
+ "files": {
+  "reduce.comp": "#version 450\n\nlayout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n\n// Input buffer: flat float array of arbitrary length\nlayout(std430, binding = 0) readonly buffer InputBuffer {\n    float data[];\n} inputBuf;\n\n// Output buffer: one partial sum per workgroup\nlayout(std430, binding = 1) writeonly buffer OutputBuffer {\n    float partialSums[];\n} outputBuf;\n\n// Total number of elements in the input array\nlayout(push_constant) uniform PushConstants {\n    uint elementCount;\n} pc;\n\n// Shared memory for the tree reduction \u2014 one slot per lane\nshared float sdata[256];\n\nvoid main() {\n    uint lid   = gl_LocalInvocationID.x;   // lane index within workgroup [0, 255]\n    uint gid   = gl_GlobalInvocationID.x;  // global element index\n    uint wgid  = gl_WorkGroupID.x;         // workgroup index\n\n    // Load one element per lane; pad out-of-range lanes with 0.0 so the\n    // reduction is correct regardless of whether elementCount is a multiple\n    // of 256.\n    sdata[lid] = (gid < pc.elementCount) ? inputBuf.data[gid] : 0.0;\n\n    // Ensure every lane has written its value before the first reduction step\n    barrier();\n    memoryBarrierShared();\n\n    // Tree reduction: each step halves the active lane count.\n    // stride starts at 128 and halves each iteration until 1.\n    for (uint stride = 128u; stride > 0u; stride >>= 1u) {\n        if (lid < stride) {\n            sdata[lid] += sdata[lid + stride];\n        }\n        barrier();\n        memoryBarrierShared();\n    }\n\n    // Lane 0 holds the workgroup partial sum; write it to the output buffer.\n    if (lid == 0u) {\n        outputBuf.partialSums[wgid] = sdata[0];\n    }\n}\n"
+ },
+ "prose": "`reduce.comp` is written. The shader does a 256-lane tree reduction in shared memory, pads out-of-range lanes with zero so non-multiple array sizes work, and writes one partial sum per workgroup to the output buffer. You'd typically dispatch `ceil(N/256)` workgroups and then sum the `partialSums` buffer (CPU-side or a second dispatch) to get the final total.",
+ "rounds": 6,
+ "secs": 59.2
+}
