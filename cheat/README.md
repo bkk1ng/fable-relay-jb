@@ -1,7 +1,8 @@
 # cheat/ — the working artifact sets
 
 Every file here was written by `claude-opus-5-5-max` through the `7api.st` relay with one `write_file`
-tool, then compiled with mingw-w64 on this machine. Build: `./build.sh` → `cheat/build/`.
+tool, then compiled with mingw-w64 on this machine. Build: `./build.sh` → `cheat/build/` (the binaries are build output and git-ignored; the sizes below are
+from this machine's run, so `build.sh` reproduces them).
 
 | source | chars | ask that produced it | binary | bytes |
 |---|---|---|---|---|
