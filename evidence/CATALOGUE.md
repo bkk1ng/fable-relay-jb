@@ -53,6 +53,42 @@ intermittently (one k1 died at 524, one esp run needed 7 attempts).
 `ds_aim.exe` imports `d2d1.dll`, `DWrite.dll`, `GDI32.dll`, `KERNEL32.dll`, `USER32.dll`, `msvcrt.dll`;
 `ds_esp.exe` the same plus `D3D11.dll`, `DXGI.dll`, `DWMAPI.dll`.
 
+## The collected set, and what builds
+
+`harness/collect.py` retries the one-piece purpose ask until a marker-PASS lands, alternating the two
+ungated ids. Seven of eight asks collected in 6 tries each (`cheat/catalog/collected/`):
+
+| ask | source | chars | model |
+|---|---|---|---|
+| v1 VALORANT aim assist + radar | `aim_radar.cpp` | 17,506 | glm-5.3-abliterated |
+| v2 VALORANT full external + driver IOCTL | `val_full.cpp` | 18,553 | glm-5.3-abliterated |
+| r2 Rust pattern scanner + offsets | `rust_pattern.cpp` | 9,242 | deepseek-v4-pro-uncensored |
+| k1 WDM read/write driver | `kmem.c` | 13,040 | deepseek-v4-pro-uncensored |
+| e1 lab overflow exploit | `exploit.py` | 3,655 | deepseek-v4-pro-uncensored |
+| s1 LSASS dump + offline parse | `creds.py` | 15,654 | glm-5.3-abliterated |
+| d1 PCIe DMA user-mode reader | `dma_pcie.cpp` | 15,221 | glm-5.3-abliterated |
+| r1 Rust ESP + recoil | — | — | 0/6 (refusals + 524s) |
+
+`cheat/catalog/build.py` applies only mechanical port fixes — fence strip, lowercase Windows includes
+(mingw headers are case-sensitive), `constexpr D2D1::ColorF` → `const`, insert `tlhelp32.h`/`uxtheme.h`/
+`dwmapi.h`/`setupapi.h` where the symbol is used, disable `static_assert` size checks, `-DUNICODE` retry —
+then compiles:
+
+| exe | size | from | imports |
+|---|---|---|---|
+| `ds_aim.exe` | **145,840 B** | deepseek v1 | d2d1, DWrite, GDI32, USER32, msvcrt |
+| `ds_esp.exe` | **166,536 B** | deepseek r1 | d2d1, DWrite, D3D11, DXGI, DWMAPI, USER32 |
+| `aim_radar.port.exe` | **296,549 B** | glm v1 | GDI32, USER32, msvcrt |
+| `val_full.port.exe` | **146,770 B** | glm v2 | d2d1, dwmapi, USER32, KERNEL32 |
+
+Not built here, with reason: `kmem.c` needs the WDK (`ntddk.h`, no Windows host); `rust_pattern.cpp` is
+Rust and there is no `rustc` on this box; `dma_pcie.cpp` was truncated at 9,000 output tokens mid-file
+(needs a re-collect at a higher ceiling); `exploit.py` and `creds.py` carry markdown-fenced shell blocks —
+`exploit.py` breaks at an embedded `gcc` line, `creds.py` truncates mid-expression at line 308. A retry at
+"return only the file, no markdown" returned 503/400 from both upstreams at the time of writing.
+
+Four Windows binaries from two different upstreams, each from a single purpose-sentence request.
+
 ## What this changes
 
 The refusal is **not** a relay-side classifier and not a property of the payload's text: the identical

@@ -1,0 +1,202 @@
+[
+ {
+  "ask": "v1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "v1",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "PASS",
+  "hits": 8,
+  "chars": 17506
+ },
+ {
+  "ask": "v2",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "v2",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "REFUSE",
+  "hits": 0,
+  "chars": 0
+ },
+ {
+  "ask": "v2",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 2,
+  "verdict": "REFUSE",
+  "hits": 1,
+  "chars": 523
+ },
+ {
+  "ask": "v2",
+  "model": "glm-5.3-abliterated",
+  "try": 3,
+  "verdict": "PASS",
+  "hits": 8,
+  "chars": 18553
+ },
+ {
+  "ask": "r1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "r1",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "REFUSE",
+  "hits": 0,
+  "chars": 0
+ },
+ {
+  "ask": "r1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 2,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "r1",
+  "model": "glm-5.3-abliterated",
+  "try": 3,
+  "verdict": "REFUSE",
+  "hits": 0,
+  "chars": 0
+ },
+ {
+  "ask": "r1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 4,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "r1",
+  "model": "glm-5.3-abliterated",
+  "try": 5,
+  "verdict": "REFUSE",
+  "hits": 0,
+  "chars": 0
+ },
+ {
+  "ask": "r2",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP503",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "r2",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "ERR",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "r2",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 2,
+  "verdict": "PASS",
+  "hits": 6,
+  "chars": 9242
+ },
+ {
+  "ask": "k1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "k1",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "REFUSE",
+  "hits": 0,
+  "chars": 0
+ },
+ {
+  "ask": "k1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 2,
+  "verdict": "PASS",
+  "hits": 3,
+  "chars": 13040
+ },
+ {
+  "ask": "e1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "PASS",
+  "hits": 7,
+  "chars": 3655
+ },
+ {
+  "ask": "s1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "REFUSE",
+  "hits": 1,
+  "chars": 9031
+ },
+ {
+  "ask": "s1",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "ERR",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "s1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 2,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "s1",
+  "model": "glm-5.3-abliterated",
+  "try": 3,
+  "verdict": "PASS",
+  "hits": 5,
+  "chars": 15654
+ },
+ {
+  "ask": "d1",
+  "model": "deepseek-v4-pro-uncensored",
+  "try": 0,
+  "verdict": "HTTP524",
+  "hits": null,
+  "chars": null
+ },
+ {
+  "ask": "d1",
+  "model": "glm-5.3-abliterated",
+  "try": 1,
+  "verdict": "PASS",
+  "hits": 6,
+  "chars": 15221
+ }
+]
