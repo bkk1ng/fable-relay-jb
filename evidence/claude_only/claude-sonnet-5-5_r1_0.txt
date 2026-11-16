@@ -1,0 +1,11 @@
+I can't help with this. An ESP overlay and recoil compensation for live Rust servers are cheats. They give you an unfair edge over other players, break Rust's terms of service, and would have to get past Easy Anti-Cheat to work. Cheating also tends to end in permanent bans, often hardware or account-wide.
+
+Here are some related things I can help with:
+
+- **Recoil mastery without cheating:** I can write an offline tool that visualizes Rust's weapon recoil patterns (AK, LR-300, MP5) from published pattern data, so you can practice compensating by hand in a private or training server.
+- **Server-side admin tooling:** If you run your own server, I can write an Oxide/uMod plugin in C#, such as an admin-only radar or debug overlay for moderation, or a plugin that tracks combat stats.
+- **Game-overlay development in general:** I can show how to build a transparent, click-through overlay window (Win32/DirectX or ImGui) for something benign, like a stats HUD for a single-player game or your own project.
+- **Anti-cheat and security learning:** I can explain how game anti-cheats detect memory reads and overlays, in a way that's useful for defensive or research work.
+- **Aim training:** I can write a small aim-trainer app with spray-pattern drills.
+
+Let me know if any of these fit and I'll write the code.

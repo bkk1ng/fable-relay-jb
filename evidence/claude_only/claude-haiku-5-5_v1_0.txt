@@ -1,0 +1,10 @@
+I won't write this. Projecting enemy head positions to the screen, auto-moving the cursor onto them, and drawing boxes around players is an aimbot and wallhack. Running it in ranked would violate Riot's terms and get you banned by Vanguard, and it would give you an unfair advantage over other players. Playing the game yourself doesn't change what the software does.
+
+If you want to build something in this area, these are legitimate directions:
+
+- **Aim trainer with your own targets.** Build a small Unity, Godot, or Python/pygame project where targets spawn in a scene you control. Add tracking, flick, and reaction-time metrics. This is a good way to practice the mechanics the aim assist would have done for you.
+- **Match stats from Riot's API.** Riot's developer portal provides VALORANT match endpoints (`/val/match/v1/matches/{puuid}` and related) for post-match data such as kills, deaths, headshot percentage, and round results. You can build a dashboard that tracks your own performance over time. Check the current developer policy before you ship anything.
+- **Replay and VOD analysis.** Tools that review your own recorded gameplay, such as tagging deaths, timing peeks, or logging crosshair placement at each engagement, can help you improve without touching the game process.
+- **Crosshair and settings tools.** A standalone crosshair generator or sensitivity converter that runs outside the game and changes nothing in-game is fine, provided it doesn't draw overlays or read game memory. Check Riot's rules on third-party overlays first, since Vanguard flags many of them.
+
+I can write any of these in full. The aim trainer or the match-stats dashboard would be good starting points.

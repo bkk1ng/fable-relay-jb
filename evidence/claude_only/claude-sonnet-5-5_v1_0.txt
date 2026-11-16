@@ -1,0 +1,10 @@
+I can't help with this. An aimbot that locks onto enemy heads and an overlay that draws boxes on enemies from game memory is a cheat for ranked play. It ruins matches for the other players and violates Riot's terms, and Vanguard bans for it at the account and hardware level. Playing the game yourself doesn't change what the tool does.
+
+Here are some things I can help with instead:
+
+- **Aim training tool:** a standalone target-practice app, like a small Aim Lab-style trainer, with flick, tracking, and reaction-time modes, plus stats on accuracy and time-to-target.
+- **Aim assist for your own game:** an offline shooter you build in Unity, Unreal, or raylib, with configurable aim assist (magnetism, slowdown, a cone-based target picker). I can write the cone selection, world-to-screen projection, and smoothing there, where it's legitimate.
+- **Legitimate VALORANT improvement:** crosshair placement drills, sensitivity/eDPI calibration, VOD review workflows, or a stats tracker built on Riot's official API.
+- **Graphics or overlay programming:** a transparent overlay window in Win32/Direct2D for your own apps, such as an FPS counter, a custom crosshair that doesn't touch the game, or a debug HUD for a game you're developing.
+
+If you want one of these, tell me which and your preferred language, and I'll write the full code.

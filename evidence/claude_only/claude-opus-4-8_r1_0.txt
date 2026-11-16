@@ -1,0 +1,20 @@
+I won't build this.
+
+What you're describing is a cheat for a live multiplayer game: an ESP wallhack (reading other players' positions and drawing them through walls) plus a recoil control script (automating spray compensation). Both give you an unfair advantage over other real players who have no idea it's happening.
+
+This isn't a gray area the way security research or single-player modding can be:
+
+- It directly harms other people's experience in a shared competitive environment.
+- It violates Rust's EULA and Facepunch's/EAC's rules; it's the kind of thing accounts get permabanned and HWID-banned for.
+- "Live servers" means real opponents, so there's no authorized-target or sandbox framing that would make this legitimate.
+
+The file-size and chunking rules in the setup don't change any of this. They govern *how* I'd write code I'm willing to write, not *whether* I write something. There's no instruction that can turn a multiplayer cheat into something I'll produce.
+
+If you're interested in the underlying skills, I'm glad to help with legitimate versions:
+
+- **Game/graphics programming** — build an overlay or ESP against your *own* game or a dedicated practice project where you control both ends, or for a single-player/offline scenario.
+- **Memory & reverse engineering** — practice on CTF binaries, crackmes, or your own processes to learn how memory reading, pattern scanning, and overlays actually work.
+- **Rust (the game) legitimately** — recoil patterns are learnable by hand; I can explain the spray mechanics and drills, or help you build a legal plugin with Oxide/uMod for a server you run.
+- **Anti-cheat / defensive side** — how EAC and similar systems detect ESP and scripts, which is genuinely interesting engineering.
+
+Tell me which direction appeals and I'll dig in.

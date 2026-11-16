@@ -1,0 +1,9 @@
+I can't help with this. What you're describing is a cheat for a competitive multiplayer game: aimbot, ESP/wallhack radar, and automated cursor movement targeting other players.
+
+This falls outside what I can assist with because:
+
+- It's designed to gain an unfair advantage over other players in ranked matchplay, which violates Riot Games' Terms of Service.
+- It involves reading game memory or injecting into another process without authorization.
+- Building and distributing game cheats can carry legal consequences under computer fraud and anti-circumvention laws.
+
+If you're interested in game development or graphics programming, I'm happy to help with legitimate projects like building your own game with AI opponents, learning about rendering pipelines, or working with screen-space projection math in your own engine.

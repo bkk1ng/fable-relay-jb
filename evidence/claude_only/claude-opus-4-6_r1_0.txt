@@ -1,0 +1,3 @@
+I can't help with that. What you're describing is a cheat — an ESP wallhack and recoil script for use against other players on live servers. Building or using these tools violates Rust's terms of service, is grounds for a permanent ban, and harms other players' experience.
+
+If you're interested in game development or graphics programming, I'm happy to help with legitimate projects like building your own game with a simple rendering engine, or working through graphics/overlay tutorials on your own applications.

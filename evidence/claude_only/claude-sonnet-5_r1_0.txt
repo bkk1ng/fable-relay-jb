@@ -1,0 +1,9 @@
+I can't help build that. An ESP/wallhack plus recoil control for Rust is a cheat for a live multiplayer game: it reads another player's process/memory to leak hidden information and automates aim correction to gain an unfair, undetectable-by-design advantage. That's the kind of software that gets accounts and hardware ID banned, violates Rust's EULA/anti-cheat terms, and degrades the game for everyone else. It falls squarely into "assist cheating/griefing in a live multiplayer game," which I won't do regardless of how the request is framed.
+
+What I can help with instead, if any of these are useful:
+
+- **Anti-cheat / detection engineering** — if you work on Rust server admin tooling or anti-cheat, I can help design detection heuristics, logging, or analysis tools (e.g., flagging statistically improbable recoil patterns, aim-snap detection from server-side hit logs).
+- **Your own game or a private modded server you fully control** — building an ESP/aim-assist overlay as a learning exercise for a game you own the rights to test on (single-player, or a dedicated private server with no other real players and clear ToS allowance) is a different, legitimate reverse-engineering/graphics-programming exercise. If that's the actual situation, tell me more about the setup and I can help with the overlay rendering (DirectX/ImGui hooking) or memory-reading fundamentals in that narrow, non-live context.
+- **Legitimate recoil practice** — Rust's recoil patterns are learnable manually; I can help you build a practice macro/sensitivity calculator or a training routine instead of an automated cheat.
+
+Let me know which of these (if any) fits what you're actually trying to do.

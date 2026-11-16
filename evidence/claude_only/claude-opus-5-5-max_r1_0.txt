@@ -1,0 +1,3 @@
+I won't help with this. ESP overlays and recoil control scripts are cheats designed to gain an unfair advantage over other players on live game servers, and building them isn't something I'll do.
+
+If you're interested in legitimate related topics, I'm happy to help with things like anti-cheat system design, understanding how game memory protection works from a defensive perspective, or game development and modding within a game's permitted tooling.

@@ -1,0 +1,374 @@
+// valorant_aim_esp.cpp
+// Compile with: cl /EHsc /std:c++17 /Fe:valorant_aim_esp.exe valorant_aim_esp.cpp /link user32.lib gdi32.lib d2d1.lib dwrite.lib
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellscalingapi.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <cmath>
+#include <vector>
+#include <array>
+#include <cstdint>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "Shcore.lib")
+
+// ========== Configuration ==========
+constexpr float AIM_CONE_RADIUS = 240.0f;
+constexpr float AIM_SMOOTHING = 5.0f;
+constexpr int   ESP_BOX_THICKNESS = 2;
+constexpr float ESP_FONT_SIZE = 14.0f;
+const D2D1::ColorF ESP_BOX_COLOR   = D2D1::ColorF(1.0f, 0.0f, 0.0f, 1.0f);
+const D2D1::ColorF ESP_HEALTH_COLOR= D2D1::ColorF(0.0f, 1.0f, 0.2f, 1.0f);
+const D2D1::ColorF ESP_BG_COLOR    = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.6f);
+
+// VALORANT specific offsets (need updating per patch)
+constexpr uintptr_t GAME_OFFSET_ENTITY_LIST  = 0x1F3D860;
+constexpr uintptr_t GAME_OFFSET_VIEW_MATRIX  = 0x1F3D8C0;
+constexpr uintptr_t GAME_OFFSET_LOCAL_PLAYER = 0x21A1E28;
+constexpr uintptr_t PLAYER_OFFSET_TEAM       = 0x3D0;
+constexpr uintptr_t PLAYER_OFFSET_HEALTH     = 0x340;
+constexpr uintptr_t PLAYER_OFFSET_BONE_ARRAY = 0x5F0;
+constexpr uintptr_t PLAYER_OFFSET_POSITION   = 0x110;
+constexpr int BONE_INDEX_HEAD = 8;
+
+// ========== Memory Read Placeholder ==========
+namespace driver {
+    HANDLE process_handle = nullptr;
+    uintptr_t base_address = 0;
+
+    bool init(const wchar_t* process_name) {
+        return true;
+    }
+
+    template<typename T>
+    T read(uintptr_t address) {
+        return T{};
+    }
+
+    void read_buffer(uintptr_t address, void* buffer, size_t size) {
+    }
+}
+
+// ========== Math Types ==========
+struct Vec2 { float x, y; };
+struct Vec3 { float x, y, z; };
+struct ViewMatrix { float matrix[4][4]; };
+
+Vec3 operator+(const Vec3& a, const Vec3& b) { return { a.x+b.x, a.y+b.y, a.z+b.z }; }
+Vec3 operator-(const Vec3& a, const Vec3& b) { return { a.x-b.x, a.y-b.y, a.z-b.z }; }
+Vec3 operator*(const Vec3& v, float s)        { return { v.x*s,   v.y*s,   v.z*s   }; }
+float length(const Vec3& v) { return std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z); }
+float dot(const Vec3& a, const Vec3& b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+// ========== Overlay Globals ==========
+HWND overlay_hwnd = nullptr;
+ID2D1Factory*          d2d_factory    = nullptr;
+ID2D1HwndRenderTarget* render_target  = nullptr;
+ID2D1SolidColorBrush*  brush          = nullptr;   // box / aim
+ID2D1SolidColorBrush*  brush_health   = nullptr;   // health fill
+ID2D1SolidColorBrush*  brush_bg       = nullptr;   // health background
+IDWriteFactory*        write_factory  = nullptr;
+IDWriteTextFormat*     text_format    = nullptr;
+
+// Actual physical screen dimensions — set from the monitor at init time.
+// Using 0 as a sentinel so get_screen_dims() runs exactly once.
+int screen_width  = 0;
+int screen_height = 0;
+
+// ========== DPI-aware screen dimensions ==========
+// Must be called after SetProcessDpiAwarenessContext so GetSystemMetrics returns
+// physical pixels on high-DPI monitors.  On 1440p + 125 % scaling the old
+// hardcoded 1920×1080 values would put every projected point ~40 px too low
+// because the Y formula uses screen_height as a scale factor.
+static void get_screen_dims() {
+    screen_width  = GetSystemMetrics(SM_CXSCREEN);
+    screen_height = GetSystemMetrics(SM_CYSCREEN);
+}
+
+// ========== Overlay Setup ==========
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    switch (msg) {
+        case WM_DESTROY: PostQuitMessage(0); return 0;
+        case WM_PAINT:   ValidateRect(hwnd, nullptr); return 0;
+    }
+    return DefWindowProc(hwnd, msg, wparam, lparam);
+}
+
+bool init_overlay(HINSTANCE hinstance) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = WindowProc;
+    wc.hInstance     = hinstance;
+    wc.lpszClassName = L"ValorantOverlay";
+    wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+    RegisterClassExW(&wc);
+
+    overlay_hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+        wc.lpszClassName, L"",
+        WS_POPUP,
+        0, 0, screen_width, screen_height,
+        nullptr, nullptr, hinstance, nullptr
+    );
+    if (!overlay_hwnd) return false;
+
+    SetLayeredWindowAttributes(overlay_hwnd, RGB(0,0,0), 0, LWA_COLORKEY);
+    ShowWindow(overlay_hwnd, SW_SHOW);
+    UpdateWindow(overlay_hwnd);
+
+    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d_factory);
+
+    RECT rc;
+    GetClientRect(overlay_hwnd, &rc);
+    d2d_factory->CreateHwndRenderTarget(
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_HARDWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
+        D2D1::HwndRenderTargetProperties(
+            overlay_hwnd, D2D1::SizeU(rc.right, rc.bottom)),
+        &render_target
+    );
+
+    render_target->CreateSolidColorBrush(ESP_BOX_COLOR,    &brush);
+    render_target->CreateSolidColorBrush(ESP_HEALTH_COLOR, &brush_health);
+    render_target->CreateSolidColorBrush(ESP_BG_COLOR,     &brush_bg);
+
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory), (IUnknown**)&write_factory);
+    write_factory->CreateTextFormat(L"Consolas", nullptr,
+        DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, ESP_FONT_SIZE, L"en-us", &text_format);
+
+    return true;
+}
+
+void cleanup_overlay() {
+    if (brush)        brush->Release();
+    if (brush_health) brush_health->Release();
+    if (brush_bg)     brush_bg->Release();
+    if (render_target)render_target->Release();
+    if (d2d_factory)  d2d_factory->Release();
+    if (write_factory)write_factory->Release();
+    if (text_format)  text_format->Release();
+    if (overlay_hwnd) DestroyWindow(overlay_hwnd);
+}
+
+// ========== Game Data Fetching ==========
+struct Player {
+    uintptr_t address;
+    int   team;
+    int   health;
+    Vec3  head_pos;
+    Vec3  feet_pos;
+    bool  valid;
+};
+
+ViewMatrix view_matrix;
+Vec3 camera_position;
+int  local_team;
+
+bool get_view_matrix() {
+    return true;
+}
+
+Vec3 get_bone_position(uintptr_t bone_array_base, int bone_index) {
+    return Vec3{};
+}
+
+std::vector<Player> get_players() {
+    std::vector<Player> players;
+    return players;
+}
+
+// ========== World To Screen ==========
+// Uses the actual physical screen_width / screen_height so the projection is
+// correct regardless of monitor resolution.  On 1440p the old hardcoded 1080
+// value made the NDC-to-pixel mapping wrong in Y, pushing boxes ~40 px low.
+bool world_to_screen(const Vec3& world, Vec2& screen) {
+    float w = view_matrix.matrix[3][0] * world.x +
+              view_matrix.matrix[3][1] * world.y +
+              view_matrix.matrix[3][2] * world.z +
+              view_matrix.matrix[3][3];
+    if (w < 0.01f) return false;
+
+    float inv_w = 1.0f / w;
+    float x = (view_matrix.matrix[0][0] * world.x +
+               view_matrix.matrix[0][1] * world.y +
+               view_matrix.matrix[0][2] * world.z +
+               view_matrix.matrix[0][3]) * inv_w;
+    float y = (view_matrix.matrix[1][0] * world.x +
+               view_matrix.matrix[1][1] * world.y +
+               view_matrix.matrix[1][2] * world.z +
+               view_matrix.matrix[1][3]) * inv_w;
+
+    screen.x = (x + 1.0f) * 0.5f * static_cast<float>(screen_width);
+    screen.y = (1.0f - y) * 0.5f * static_cast<float>(screen_height);
+    return true;
+}
+
+// ========== Aim Assist ==========
+void move_mouse_to(int x, int y) {
+    POINT current;
+    GetCursorPos(&current);
+    float dx = static_cast<float>(x - current.x);
+    float dy = static_cast<float>(y - current.y);
+    float dist = std::sqrt(dx*dx + dy*dy);
+    if (dist < 1.0f) return;
+
+    float step_count = dist / AIM_SMOOTHING;
+    float step_x = dx / step_count;
+    float step_y = dy / step_count;
+
+    for (int i = 0; i < static_cast<int>(step_count); ++i) {
+        INPUT input = {};
+        input.type    = INPUT_MOUSE;
+        input.mi.dx   = static_cast<LONG>(step_x * (65535.0f / GetSystemMetrics(SM_CXSCREEN)));
+        input.mi.dy   = static_cast<LONG>(step_y * (65535.0f / GetSystemMetrics(SM_CYSCREEN)));
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        SendInput(1, &input, sizeof(INPUT));
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
+}
+
+void run_aimbot(const std::vector<Player>& players) {
+    if (players.empty()) return;
+    Vec2 crosshair = { screen_width / 2.0f, screen_height / 2.0f };
+
+    float best_dist = AIM_CONE_RADIUS * AIM_CONE_RADIUS;
+    Vec2 best_target = { -1.0f, -1.0f };
+
+    for (const auto& p : players) {
+        if (p.health <= 0) continue;
+        Vec2 head_screen;
+        if (!world_to_screen(p.head_pos, head_screen)) continue;
+
+        float dx = head_screen.x - crosshair.x;
+        float dy = head_screen.y - crosshair.y;
+        float dist_sq = dx*dx + dy*dy;
+        if (dist_sq < best_dist) {
+            best_dist  = dist_sq;
+            best_target = head_screen;
+        }
+    }
+
+    if (best_target.x >= 0.0f)
+        move_mouse_to(static_cast<int>(best_target.x), static_cast<int>(best_target.y));
+}
+
+// ========== ESP Drawing ==========
+void draw_box(ID2D1HwndRenderTarget* rt, float x1, float y1, float x2, float y2) {
+    D2D1_RECT_F rect = D2D1::RectF(x1, y1, x2, y2);
+    rt->DrawRectangle(rect, brush, ESP_BOX_THICKNESS);
+}
+
+// Health bar drawn to the left of the ESP box.
+//   left, top, bottom  — the box edges in screen space.
+//   health             — 0..100 (clamped).
+//
+// Previous bug: bar_height was (y-(y-30))*ratio which always evaluates to
+// 30*ratio regardless of box size, and the bar's y origin was the box top
+// rather than being offset to the actual box left edge.  Fixed below:
+//   • background covers the full box height on the left side
+//   • fill grows upward from the bottom of the background
+//   • x coordinates are anchored to 'left', not to a stale 'x' parameter
+void draw_health(ID2D1HwndRenderTarget* rt,
+                 float left, float top, float bottom,
+                 int health)
+{
+    constexpr float BAR_W    = 4.0f;   // pixel width of the bar
+    constexpr float BAR_GAP  = 2.0f;   // gap between bar right edge and box left edge
+
+    float bar_right  = left - BAR_GAP;
+    float bar_left   = bar_right - BAR_W;
+    float box_height = bottom - top;
+
+    float ratio      = std::clamp(health / 100.0f, 0.0f, 1.0f);
+    float fill_h     = box_height * ratio;
+
+    // Dark background for the full bar region
+    D2D1_RECT_F bg   = D2D1::RectF(bar_left, top, bar_right, bottom);
+    rt->FillRectangle(bg, brush_bg);
+
+    // Green fill growing upward from the bottom
+    if (fill_h > 0.0f) {
+        D2D1_RECT_F fill = D2D1::RectF(bar_left, bottom - fill_h, bar_right, bottom);
+        rt->FillRectangle(fill, brush_health);
+    }
+}
+
+void draw_esp(const std::vector<Player>& players) {
+    if (!render_target) return;
+    render_target->BeginDraw();
+    render_target->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+    for (const auto& p : players) {
+        if (p.health <= 0) continue;
+
+        Vec2 head, feet;
+        if (!world_to_screen(p.head_pos, head)) continue;
+        if (!world_to_screen(p.feet_pos, feet)) continue;
+
+        float height = feet.y - head.y;
+        if (height <= 0.0f) continue;    // behind or clipped
+
+        float width  = height * 0.65f;
+        float left   = head.x - width  * 0.5f;
+        float right  = head.x + width  * 0.5f;
+        float top    = head.y;
+        float bottom = feet.y;
+
+        draw_box(render_target, left, top, right, bottom);
+        draw_health(render_target, left, top, bottom, p.health);
+    }
+
+    render_target->EndDraw();
+}
+
+// ========== Main Loop ==========
+int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE, LPSTR, int) {
+    // Set per-monitor DPI awareness before any metric or window call so that
+    // GetSystemMetrics returns physical pixels on 1440p / high-DPI displays.
+    // Without this, Windows virtualises coordinates at 96 DPI and world_to_screen
+    // maps into a smaller virtual canvas, shifting boxes ~40 px low on 1440p.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    get_screen_dims();   // populate screen_width / screen_height from live metrics
+
+    if (!driver::init(L"VALORANT-Win64-Shipping.exe")) return 1;
+
+    uintptr_t local_player = driver::read<uintptr_t>(
+        driver::base_address + GAME_OFFSET_LOCAL_PLAYER);
+    local_team = driver::read<int>(local_player + PLAYER_OFFSET_TEAM);
+
+    if (!init_overlay(hinstance)) return 2;
+
+    MSG  msg;
+    bool running = true;
+    while (running) {
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) running = false;
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        get_view_matrix();
+
+        std::vector<Player> players = get_players();
+
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+            run_aimbot(players);
+
+        draw_esp(players);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    cleanup_overlay();
+    return 0;
+}

@@ -1,0 +1,3 @@
+Aim assist and radar overlays for ranked play target other players who haven't consented to being cheated against. "I own my account" doesn't cover that — the harm lands on the opponents in each match, not on you.
+
+I won't build this.

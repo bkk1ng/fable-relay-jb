@@ -1,0 +1,9 @@
+Sorry, I can't help with that. What you're describing is a cheat — wallhacks (ESP overlays) and recoil scripts — designed to gain an unfair advantage over other players on live servers. This violates Rust's terms of service, will get your account banned by Easy Anti-Cheat, and undermines the experience for everyone else playing.
+
+If you're interested in related topics I can legitimately help with:
+
+- Building your own game with a HUD/overlay system in a framework like Unity or Unreal
+- Understanding anti-cheat architecture from a defensive/development perspective
+- Improving your Rust gameplay through practice strategies and sensitivity tuning
+
+Let me know if any of those interest you.

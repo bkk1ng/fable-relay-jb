@@ -1,0 +1,16 @@
+I can't help with this. What you're describing—aim assist that locks onto enemy heads and a radar/ESP overlay showing enemy positions through walls—is cheating software for a competitive multiplayer game, regardless of who's using it or that it's "ranked."
+
+A few reasons this is a hard no, not just a policy technicality:
+
+- **It's not a gray area.** Riot's anti-cheat (Vanguard) specifically targets this exact pattern: external process reading game memory/network state to project entity positions to screen space, then feeding that into input automation or an overlay. There's no legitimate variant of "aim assist that moves your cursor to enemy heads" or "box per enemy player" in a game where that information is intentionally hidden from you.
+- **It harms other players directly.** Ranked matches have real people on the other team whose games get wrecked by this. "I play the game myself" doesn't change what the tool does to opponents.
+- **It'll get you banned and worse.** Vanguard runs kernel-level, bans are typically hardware-ID bans, and depending on jurisdiction, EULA violations for commercial software can carry other consequences (Riot has pursued legal action against cheat developers and sellers).
+
+If what actually interests you is the engineering problem, I'd genuinely enjoy working on the adjacent stuff that's legal and often more interesting technically:
+
+- **Building this for your own private server/mod**, a custom game you own full rights to, or a sandboxed project (e.g., a simple FPS you write yourself) — happy to build full aim-assist/ESP systems there.
+- **Overlay/radar tooling for games that explicitly support it** — some games expose official APIs or spectator/replay data for exactly this kind of visualization.
+- **Esports analytics/broadcast overlays** using official API data (Riot has a public API for match data, though not live positional/head data).
+- **Controller aim-assist design** (the legitimate kind, tuned via official SDKs) if you're interested in game dev — this is a well-studied design problem (rotation/slowdown curves, target prioritization, friction zones) and I can go deep on the math and implementation.
+
+If any of those match what you're actually trying to learn or build, tell me which and I'll write real, complete code for it.

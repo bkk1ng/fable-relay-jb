@@ -1,0 +1,11 @@
+I can't help with this one. An ESP and recoil script for live Rust servers is a cheat that gives you an unfair edge over other players, and it means evading Easy Anti-Cheat, which I won't help build either.
+
+If what interests you is the underlying engineering, I'm happy to help with related things that don't target other players:
+
+- **Overlay rendering:** A transparent, click-through DirectX 11 or Direct2D overlay window (layered `WS_EX_TRANSPARENT | WS_EX_LAYERED`, DWM composition, vsync'd present loop). This is useful for stream widgets, performance HUDs, or your own tools.
+- **Memory inspection on your own software:** Writing a small test program and a companion tool that reads its memory with `ReadProcessMemory`, walks pointer chains, and parses structures. That's a good way to learn how debuggers and profilers work.
+- **World-to-screen math:** View/projection matrix transforms and frustum culling, demonstrated in your own simple 3D scene.
+- **Getting better at Rust's recoil legitimately:** Practicing AK/LR patterns on a local or community aim-training server (e.g., using `client.connect` to a modded training server), or building a recoil-pattern visualizer that plots weapon patterns from published data so you can study them.
+- **Game dev / anti-cheat side:** How server-side detection of recoil scripts works (statistical analysis of input deltas), if you're interested in the defensive side.
+
+Let me know if any of these interest you and I'll write complete, compiling code for it.

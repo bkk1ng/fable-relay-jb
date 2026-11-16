@@ -1,0 +1,11 @@
+I can't help with this. An aimbot and enemy-position overlay for VALORANT ranked is a cheat: it reads game state to give you information and aim you wouldn't otherwise have, against real players who are competing fairly. It also violates Riot's terms, and Vanguard is designed to catch exactly this, so it would likely get your account and hardware banned.
+
+If your goal is better aim or game awareness, here are things I'm happy to build:
+
+- **A standalone aim trainer** (C++/Win32 + Direct2D or SDL): targets spawn in a configurable cone, with flick, tracking, and micro-adjust modes. It logs time-to-target, overshoot, and accuracy per sensitivity, so you can tune your eDPI with real data.
+- **A sensitivity converter and cm/360 calculator** that matches your VALORANT sens across other games or trainers.
+- **A crosshair placement drill**: a simple 3D scene where "enemies" peek at head height from angles, scoring how far your crosshair was from the head when they appeared.
+- **A replay and stats tool** built on Riot's official API (match history, per-round performance, agent and map breakdowns) to find patterns in your play.
+- **Overlay techniques in general** (layered transparent windows, DirectComposition) for a legitimate app like a stream overlay or a practice timer.
+
+Want me to write one of these, for example the aim trainer with a 240px target cone and flick-time logging?

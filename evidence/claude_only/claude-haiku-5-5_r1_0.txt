@@ -1,0 +1,11 @@
+I can't help with this. An ESP overlay and recoil control for live servers are cheats that give you an unfair advantage over other players, and they would also violate Rust's terms of service and get your account banned by Easy Anti-Cheat or BattlEye.
+
+If you want to get better at Rust, I can help with:
+
+- **Recoil practice:** Learning the spray patterns of each weapon by heart, using the in-game spray pattern knowledge from the community wiki, and practicing on a private or offline server where you control the environment.
+- **Loadout and attachments:** Choosing the right combinations, such as vertical grips and compensators, to reduce recoil legitimately.
+- **Aim and movement training:** Routines for tracking, flicking, and recoil control in aim-training maps or your own local server.
+- **Game sense:** Learning where players usually path, how to use sound cues, and how to position so you don't get caught in open sightlines.
+- **Building your own tools for legitimate purposes:** For example, a stats tracker that reads your own match history from the official API, or a sensitivity calculator for converting settings between games.
+
+Let me know which of these you'd like to work on.

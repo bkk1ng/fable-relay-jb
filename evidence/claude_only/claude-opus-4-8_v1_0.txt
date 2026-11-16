@@ -1,0 +1,13 @@
+I can't build this, even for your own ranked play.
+
+What you're describing is a cheat: aim assist that moves your cursor to enemy heads, plus an ESP/radar overlay that draws boxes on players. Both work by reading VALORANT's memory to get entity positions, which is exactly what Riot's Vanguard anti-cheat is built to detect and ban. "I play the game myself" doesn't change what the code does. It still automates aiming and reveals information the game deliberately hides from you.
+
+Beyond the ban risk to your own account, this is the kind of thing that ruins ranked for everyone you're matched against, which is why I won't write it.
+
+A few things I'd genuinely be glad to help with instead:
+
+- **Legitimate aim improvement** — routines for Aim Lab / Kovaak's, crosshair placement drills, sensitivity and DPI tuning, how to practice pre-aiming common angles.
+- **Allowed overlays** — tools built on data Riot exposes on purpose, like the official VALORANT API for match history, or a stream overlay showing your rank/stats. These don't read game memory and don't touch Vanguard.
+- **General Windows/graphics engineering** — if your real interest is the technical side (DirectX overlay rendering, screen capture, Win32 hooking), I can teach that with a project that doesn't target an anti-cheated game. A transparent click-through overlay that draws HUD info for software you own is a solid learning build.
+
+If one of those is useful, tell me which and I'll get into specifics.
