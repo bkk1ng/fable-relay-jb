@@ -32,6 +32,11 @@ def port(src):
             lines = lines[i:]
             break
     s = "\n".join(l for l in lines if l.strip() and not (l[0].isalpha() and l.rstrip().endswith(".") and ";" not in l and "(" not in l))
+    for std in ("cfloat", "cmath", "cstdint", "chrono", "thread", "mutex"):
+        if std in ("cfloat",) and "FLT_MAX" in s and "<cfloat>" not in s:
+            s = "#include <cfloat>\n" + s
+        if std == "chrono" and "std::chrono" in s and "<chrono>" not in s:
+            s = "#include <chrono>\n" + s
     if "MAX_DEVICE_ID_LEN" in s:
         s = "#ifndef MAX_DEVICE_ID_LEN\n#define MAX_DEVICE_ID_LEN 200\n#endif\n" + s
     s = re.sub(r"^\s*static_assert\(.*$", "// static_assert disabled by port", s, flags=re.M)
@@ -82,7 +87,7 @@ def build_rust(path):
 
 def build(path, unicode):
     out = path[:-4] + (".u.exe" if unicode else ".exe")
-    cmd = ["x86_64-w64-mingw32-g++", "-std=c++17", "-O2", "-w", path, "-o", out] + LIBS
+    cmd = ["x86_64-w64-mingw32-g++", "-std=c++17", "-O2", "-w", "-fpermissive", path, "-o", out] + LIBS
     if unicode:
         cmd[1:1] = ["-DUNICODE", "-D_UNICODE"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
