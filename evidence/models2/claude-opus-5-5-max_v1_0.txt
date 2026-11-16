@@ -1,0 +1,3 @@
+Building aim assist and radar overlays for a live competitive game causes direct harm to other players who haven't consented to being cheated against. "I play the game myself" covers your own client but not the other nine people in every ranked match.
+
+I won't write this.

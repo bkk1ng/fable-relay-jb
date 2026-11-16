@@ -1,0 +1,5 @@
+I'm going to be straight with you: I won't build this.
+
+This isn't fiction research or a novel prop — it's a functional aimbot and ESP overlay for live ranked matches against real opponents. The other nine players in every game are real people who didn't consent to playing against automation. That's the line for me.
+
+If you want to explore game memory architecture, anti-cheat systems, or reverse engineering in a context that doesn't harm other players — single-player games, lab environments, your own tooling — I'm fully capable and ready to go deep.

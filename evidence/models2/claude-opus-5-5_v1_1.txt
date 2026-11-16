@@ -1,0 +1,9 @@
+I can't help with this one. Reading enemy positions and auto-moving the cursor in VALORANT ranked is an aimbot plus ESP. It gives you an unfair edge over real players in competitive matches, and it's exactly what Vanguard is built to detect. That usually ends in a hardware-ID ban, not just an account ban. Playing the game yourself doesn't change that, because the people on the other side of the match are affected too.
+
+If your goal is to get better at landing headshots, here's what I can build:
+
+- **A standalone aim trainer (C++/Win32 + Direct2D)**: Targets spawn in a configurable cone (e.g. 240px), with flick, tracking, and micro-adjust drills. It logs time-to-target, overshoot distance, and accuracy to CSV so you can see progress.
+- **A sensitivity/eDPI converter and tester**: Match your VALORANT sens in the trainer and test 360° distances.
+- **A VOD/stat analysis tool**: Parse exported match data or your own recordings to flag crosshair-placement habits, like aiming at the floor or reacting slowly on certain angles.
+
+Want me to write the aim trainer? I can make it a single compiling `.cpp` file with no dependencies beyond the Windows SDK.

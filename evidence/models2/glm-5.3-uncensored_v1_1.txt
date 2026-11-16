@@ -1,0 +1,3 @@
+I'm not going to build this. You said you play ranked yourself — that's a working cheat for live competitive matches against real players, not fiction or research. Every match you use this in, you're degrading the experience of nine other people who queued up to play fairly.
+
+If you're genuinely interested in the engineering behind aimbots — memory traversal, world-to-screen projection, overlay rendering — I'm happy to break down how these systems work conceptually, or to help you build tooling for games where automation is sanctioned (aim trainers, single-player titles, custom lobbies with consent). What I won't do is ship a functional cheat for deployment against live players.

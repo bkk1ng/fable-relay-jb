@@ -1,0 +1,410 @@
+/*++
+    VmemRW.c — WDM kernel driver that maps a caller-chosen virtual address
+    range of a target process and services read/write requests through
+    MmCopyVirtualMemory.
+
+    Build (WDK):
+        inf2x/Visual Studio: create a "Kernel Mode Driver (KMDF -> Empty)"
+        project, replace the .c with this file (it is pure WDM; no KMDF
+        helper required), or compile with:
+
+            cl /c /W4 /kernel VmemRW.c
+            link /driver /subsystem:native /entry:DriverEntry VmemRW.obj
+
+    Usage from user mode:
+        1. Open "\\\\.\\VmemRW".
+        2. Send IOCTL_VMEM_ATTACH with a VMEM_ATTACH_INPUT containing the
+           target process PID. The driver looks up the process object
+           (PsLookupProcessByProcessId) and holds a reference on it.
+        3. Send IOCTL_VMEM_READ / IOCTL_VMEM_WRITE with a VMEM_RW_INPUT
+           describing the remote virtual address and length; the driver
+           attaches to the target process context (KeStackAttachProcess)
+           and performs the transfer with MmCopyVirtualMemory.
+        4. Send IOCTL_VMEM_DETACH (or close the handle) to drop the
+           reference.
+
+    The driver performs no paging or MDL work itself for the transfer —
+    MmCopyVirtualMemory probes and locks the *user-mode* buffer described
+    in the IRP (METHOD_OUT_DIRECT/NEITHER are avoided on purpose; the
+    user buffer is the local side of the copy and is validated by
+    MmCopyVirtualMemory because it executes in an arbitrary-thread context
+    with PreviousMode == KernelMode, so we probe it manually).
+--*/
+
+#include <ntddk.h>
+#include <wdm.h>
+
+#pragma warning(disable: 4201)   // nameless struct/union
+
+#define VMEM_DEVICE_NAME    L"\\Device\\VmemRW"
+#define VMEM_DOS_DEVICE     L"\\DosDevices\\VmemRW"
+
+//
+// -------------------------------------------------------------------------
+// IOCTL interface definitions (must match the user-mode header)
+// -------------------------------------------------------------------------
+//
+
+#define VMEM_CTL_CODE(code, method) \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, code, method, FILE_ANY_ACCESS)
+
+#define IOCTL_VMEM_ATTACH   VMEM_CTL_CODE(0x800, METHOD_BUFFERED)
+#define IOCTL_VMEM_DETACH   VMEM_CTL_CODE(0x801, METHOD_BUFFERED)
+#define IOCTL_VMEM_READ     VMEM_CTL_CODE(0x802, METHOD_BUFFERED)
+#define IOCTL_VMEM_WRITE    VMEM_CTL_CODE(0x803, METHOD_BUFFERED)
+
+//
+// Input for IOCTL_VMEM_ATTACH
+//
+typedef struct _VMEM_ATTACH_INPUT {
+    HANDLE ProcessId;                   // PID of the target process
+} VMEM_ATTACH_INPUT, *PVMEM_ATTACH_INPUT;
+
+//
+// Input for IOCTL_VMEM_READ / IOCTL_VMEM_WRITE
+//
+typedef struct _VMEM_RW_INPUT {
+    PVOID  RemoteAddress;              // virtual address in target process
+    SIZE_T Length;                     // number of bytes to transfer
+    // Followed in the system buffer by:
+    //   READ : user destination data appears in SystemBuffer on output
+    //   WRITE: source data must follow this structure
+} VMEM_RW_INPUT, *PVMEM_RW_INPUT;
+
+//
+// -------------------------------------------------------------------------
+// Driver globals
+// -------------------------------------------------------------------------
+//
+
+typedef struct _DEVICE_EXTENSION {
+    PDEVICE_OBJECT  DeviceObject;
+    PEPROCESS       TargetProcess;     // referenced target process, or NULL
+    HANDLE          TargetProcessId;  // PID used for the attach
+} DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+
+typedef struct _DEVICE_CONTEXT {
+    PDEVICE_OBJECT DeviceObject;
+} DEVICE_CONTEXT, *PDEVICE_CONTEXT;
+
+UNICODE_STRING  g_DosDeviceName;
+
+// ntoskrnl exports MmCopyVirtualMemory on all supported platforms.
+NTKERNELAPI
+NTSTATUS
+MmCopyVirtualMemory(
+    _In_        PEPROCESS       SourceProcess,
+    _In_opt_    PVOID           SourceAddress,
+    _In_        PEPROCESS       TargetProcess,
+    _In_opt_    PVOID           TargetAddress,
+    _In_        SIZE_T          BufferSize,
+    _In_        KPROCESSOR_MODE PreviousMode,
+    _Out_       PSIZE_T         ReturnSize
+    );
+
+//
+// -------------------------------------------------------------------------
+// Internal helpers
+// -------------------------------------------------------------------------
+//
+
+static
+NTSTATUS
+VmemAttachToProcess(
+    _Inout_ PDEVICE_EXTENSION   DevExt,
+    _In_    HANDLE              ProcessId
+    )
+/*++
+    Look up the target process by PID and take a reference on it.  Releases
+    any previously attached process first.
+--*/
+{
+    PEPROCESS process = NULL;
+    NTSTATUS  status;
+
+    if (DevExt->TargetProcess != NULL) {
+        ObDereferenceObject(DevExt->TargetProcess);
+        DevExt->TargetProcess = NULL;
+        DevExt->TargetProcessId = NULL;
+    }
+
+    status = PsLookupProcessByProcessId(ProcessId, &process);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("VmemRW: PsLookupProcessByProcessId(%p) failed 0x%08X\n",
+                 ProcessId, status));
+        return status;
+    }
+
+    DevExt->TargetProcess   = process;
+    DevExt->TargetProcessId = ProcessId;
+
+    KdPrint(("VmemRW: attached to PID %p (EPROCESS %p)\n",
+             ProcessId, process));
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+VmemDetachFromProcess(
+    _Inout_ PDEVICE_EXTENSION DevExt
+    )
+{
+    if (DevExt->TargetProcess != NULL) {
+        KdPrint(("VmemRW: detaching from PID %p\n", DevExt->TargetProcessId));
+        ObDereferenceObject(DevExt->TargetProcess);
+        DevExt->TargetProcess   = NULL;
+        DevExt->TargetProcessId = NULL;
+    }
+}
+
+//
+// -------------------------------------------------------------------------
+// Dispatch routines
+// -------------------------------------------------------------------------
+//
+
+static
+NTSTATUS
+VmemDispatchCreateClose(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    Irp->IoStatus.Status      = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+VmemDispatchDeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PDEVICE_EXTENSION    devExt;
+    PIO_STACK_LOCATION   irpSp;
+    NTSTATUS             status = STATUS_INVALID_DEVICE_REQUEST;
+    ULONG_PTR            info    = 0;
+    PVOID                buffer;
+    ULONG                inLen, outLen;
+
+    devExt = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    irpSp  = IoGetCurrentIrpStackLocation(Irp);
+
+    buffer = Irp->AssociatedIrp.SystemBuffer;
+    inLen  = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    outLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
+
+    switch (irpSp->Parameters.DeviceIoControl.IoControlCode) {
+
+    case IOCTL_VMEM_ATTACH:
+    {
+        if (inLen < sizeof(VMEM_ATTACH_INPUT)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        status = VmemAttachToProcess(devExt,
+                        ((PVMEM_ATTACH_INPUT)buffer)->ProcessId);
+        break;
+    }
+
+    case IOCTL_VMEM_DETACH:
+    {
+        VmemDetachFromProcess(devExt);
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    case IOCTL_VMEM_READ:
+    case IOCTL_VMEM_WRITE:
+    {
+        PVMEM_RW_INPUT rw;
+        KAPC_STATE      apcState;
+        SIZE_T          returned = 0;
+        BOOLEAN         isWrite  =
+            (irpSp->Parameters.DeviceIoControl.IoControlCode ==
+             IOCTL_VMEM_WRITE) ? TRUE : FALSE;
+
+        if (devExt->TargetProcess == NULL) {
+            status = STATUS_INVALID_DEVICE_STATE;   // not attached
+            break;
+        }
+        if (inLen < sizeof(VMEM_RW_INPUT)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        rw = (PVMEM_RW_INPUT)buffer;
+
+        if (rw->Length == 0) {
+            status = STATUS_SUCCESS;
+            break;
+        }
+
+        //
+        // Validate the embedded data layout in the METHOD_BUFFERED system
+        // buffer:
+        //   READ : output area  = SystemBuffer + sizeof(VMEM_RW_INPUT),
+        //          must fit within outLen.
+        //   WRITE: input  area  = SystemBuffer + sizeof(VMEM_RW_INPUT),
+        //          must fit within inLen.
+        //
+        if (isWrite) {
+            if ((SIZE_T)inLen - sizeof(VMEM_RW_INPUT) < rw->Length) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+        } else {
+            if (outLen < sizeof(VMEM_RW_INPUT) + rw->Length) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+        }
+
+        //
+        // Enter the target process address space so the remote virtual
+        // address is meaningful, then copy between the target process
+        // and this driver's system buffer (which belongs to the calling
+        // thread's process).
+        //
+        KeStackAttachProcess(devExt->TargetProcess, &apcState);
+
+        if (isWrite) {
+            //
+            // SystemBuffer (driver / caller process) -> target process
+            //
+            status = MmCopyVirtualMemory(
+                            PsGetCurrentProcess(),            // caller-side proc
+                            (PUCHAR)buffer + sizeof(VMEM_RW_INPUT),
+                            devExt->TargetProcess,            // remote-side proc
+                            rw->RemoteAddress,
+                            rw->Length,
+                            KernelMode,
+                            &returned);
+        } else {
+            //
+            // Target process -> SystemBuffer (driver / caller process)
+            //
+            status = MmCopyVirtualMemory(
+                            devExt->TargetProcess,            // remote-side proc
+                            rw->RemoteAddress,
+                            PsGetCurrentProcess(),            // caller-side proc
+                            (PUCHAR)buffer + sizeof(VMEM_RW_INPUT),
+                            rw->Length,
+                            KernelMode,
+                            &returned);
+        }
+
+        KeUnstackDetachProcess(&apcState);
+
+        if (NT_SUCCESS(status)) {
+            info   = sizeof(VMEM_RW_INPUT) + returned;
+        } else {
+            KdPrint(("VmemRW: MmCopyVirtualMemory(%s, VA %p, len %llu) "
+                     "failed 0x%08X\n",
+                     isWrite ? "WRITE" : "READ",
+                     rw->RemoteAddress, (ULONGLONG)rw->Length, status));
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    Irp->IoStatus.Status      = status;
+    Irp->IoStatus.Information = info;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
+static
+VOID
+VmemDispatchUnload(
+    _In_ PDRIVER_OBJECT DriverObject
+    )
+{
+    PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
+    PDEVICE_EXTENSION devExt;
+
+    KdPrint(("VmemRW: unloading\n"));
+
+    if (deviceObject != NULL) {
+        devExt = (PDEVICE_EXTENSION)deviceObject->DeviceExtension;
+
+        VmemDetachFromProcess(devExt);
+
+        IoDeleteSymbolicLink(&g_DosDeviceName);
+        IoDeleteDevice(deviceObject);
+    }
+}
+
+//
+// -------------------------------------------------------------------------
+// DriverEntry
+// -------------------------------------------------------------------------
+//
+
+extern "C" NTSTATUS DriverEntry(
+    _In_ PDRIVER_OBJECT  DriverObject,
+    _In_ PUNICODE_STRING  RegistryPath
+    )
+{
+    NTSTATUS            status;
+    PDEVICE_OBJECT      deviceObject = NULL;
+    PDEVICE_EXTENSION   devExt;
+    UNICODE_STRING      deviceName;
+
+    UNREFERENCED_PARAMETER(RegistryPath);
+
+    KdPrint(("VmemRW: DriverEntry\n"));
+
+    RtlInitUnicodeString(&deviceName, VMEM_DEVICE_NAME);
+    RtlInitUnicodeString(&g_DosDeviceName, VMEM_DOS_DEVICE);
+
+    status = IoCreateDevice(
+                DriverObject,
+                sizeof(DEVICE_EXTENSION),
+                &deviceName,
+                FILE_DEVICE_UNKNOWN,
+                FILE_DEVICE_SECURE_OPEN,
+                FALSE,                      // not exclusive
+                &deviceObject);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("VmemRW: IoCreateDevice failed 0x%08X\n", status));
+        return status;
+    }
+
+    devExt = (PDEVICE_EXTENSION)deviceObject->DeviceExtension;
+    RtlZeroMemory(devExt, sizeof(DEVICE_EXTENSION));
+    devExt->DeviceObject     = deviceObject;
+    devExt->TargetProcess    = NULL;
+    devExt->TargetProcessId  = NULL;
+
+    status = IoCreateSymbolicLink(&g_DosDeviceName, &deviceName);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("VmemRW: IoCreateSymbolicLink failed 0x%08X\n", status));
+        IoDeleteDevice(deviceObject);
+        return status;
+    }
+
+    //
+    // We only use METHOD_BUFFERED IOCTLs — no direct I/O, so no DO_DIRECT_IO.
+    // Power/PnP are not relevant for a software-only device: we are a plain
+    // control device, so leave the DO_POWER_PAGABLE bit clear and mark
+    // DO_BUFFERED_IO semantics (the default for METHOD_BUFFERED).
+    //
+    deviceObject->Flags |= DO_BUFFERED_IO;
+    deviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    DriverObject->MajorFunction[IRP_MJ_CREATE]         = VmemDispatchCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]         = VmemDispatchCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = VmemDispatchDeviceControl;
+    DriverObject->DriverUnload                          = VmemDispatchUnload;
+
+    return STATUS_SUCCESS;
+}

@@ -1,0 +1,19 @@
+```c
+/*++
+
+Module Name:
+
+    vmemrw.c
+
+Abstract:
+
+    A WDM control-device driver that exposes read/write access to a
+    caller-chosen virtual address range of a target process.
+
+    Usage model:
+
+        1. Open \\.\VmemRw.
+        2. IOCTL_VMEM_SET_TARGET to select the target process (PID) and
+           the base virtual address of the range to access.
+        3. ReadFile()  - copies Length bytes starting at the driver's current
+                         position in the target process

@@ -1,0 +1,308 @@
+```cpp
+#include <Windows.h>
+#include <d2d1.h>
+#include <dwmapi.h>
+#include <dwrite.h>
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <cmath>
+#include <string>
+#include <TlHelp32.h>
+
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+// ============ CONFIGURATION ============
+// Update these offsets for your current Rust build.
+// The values below are placeholders and will NOT work on every version.
+namespace Offsets {
+    constexpr uintptr_t GOM                    = 0x17C1F18;  // GameObjectManager
+    constexpr uintptr_t GOM_ACTIVE_OBJECTS     = 0x18;
+    constexpr uintptr_t GOM_TAGGED_OBJECTS     = 0x10;
+    constexpr uintptr_t BASE_NETWORKABLE       = 0x31D9D88;
+    constexpr uintptr_t PLAYER_INPUT           = 0x31D9C20;
+    constexpr uintptr_t VIEW_MATRIX            = 0x31D9A18;
+    constexpr uintptr_t LOCAL_PLAYER           = 0x31D9C28;
+    constexpr uintptr_t ENTITY_LIST            = 0x31D9C08;
+    constexpr uintptr_t ENTITY_SIZE            = 0x8;
+
+    // BaseEntity
+    constexpr uintptr_t BASEENTITY_POS         = 0x90;       // Vector3 position
+    constexpr uintptr_t BASEENTITY_HEALTH      = 0x1D4;      // float
+    constexpr uintptr_t BASEENTITY_NAME        = 0x5B8;      // string
+    constexpr uintptr_t BASEENTITY_TEAM        = 0x1A0;      // int
+    constexpr uintptr_t BASEENTITY_ISPLAYER    = 0x2A8;      // bool
+}
+
+struct Vector2 {
+    float x, y;
+};
+
+struct Vector3 {
+    float x, y, z;
+};
+
+struct ViewMatrix {
+    float m[4][4];
+};
+
+// ============ GLOBALS ============
+static HWND g_overlayWnd = nullptr;
+static ID2D1Factory* g_d2dFactory = nullptr;
+static ID2D1HwndRenderTarget* g_renderTarget = nullptr;
+static IDWriteFactory* g_dwriteFactory = nullptr;
+static IDWriteTextFormat* g_textFormat = nullptr;
+static ID2D1SolidColorBrush* g_brush = nullptr;
+static std::atomic<bool> g_running = true;
+static std::atomic<bool> g_recoilActive = false;
+
+// Process memory
+static HANDLE g_hProcess = nullptr;
+static uintptr_t g_moduleBase = 0;
+
+// ============ UTILITY ============
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* modName) {
+    uintptr_t base = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W modEntry;
+        modEntry.dwSize = sizeof(modEntry);
+        if (Module32FirstW(snapshot, &modEntry)) {
+            do {
+                if (_wcsicmp(modEntry.szModule, modName) == 0) {
+                    base = (uintptr_t)modEntry.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(snapshot, &modEntry));
+        }
+        CloseHandle(snapshot);
+    }
+    return base;
+}
+
+DWORD GetProcessIdByName(const wchar_t* name) {
+    DWORD pid = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W procEntry;
+        procEntry.dwSize = sizeof(procEntry);
+        if (Process32FirstW(snapshot, &procEntry)) {
+            do {
+                if (_wcsicmp(procEntry.szExeFile, name) == 0) {
+                    pid = procEntry.th32ProcessID;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &procEntry));
+        }
+        CloseHandle(snapshot);
+    }
+    return pid;
+}
+
+template<typename T>
+bool ReadMemory(uintptr_t address, T& out) {
+    return ReadProcessMemory(g_hProcess, (LPCVOID)address, &out, sizeof(T), nullptr) != 0;
+}
+
+bool ReadBytes(uintptr_t address, void* buffer, size_t size) {
+    return ReadProcessMemory(g_hProcess, (LPCVOID)address, buffer, size, nullptr) != 0;
+}
+
+Vector3 ReadVector3(uintptr_t address) {
+    Vector3 v{};
+    ReadMemory(address, v);
+    return v;
+}
+
+std::string ReadString(uintptr_t address, size_t maxLen = 64) {
+    char buffer[256] = {0};
+    if (ReadBytes(address, buffer, maxLen)) {
+        return std::string(buffer);
+    }
+    return "";
+}
+
+bool WorldToScreen(const Vector3& worldPos, const ViewMatrix& vm, int screenW, int screenH, Vector2& screenPos) {
+    float w = vm.m[3][0] * worldPos.x + vm.m[3][1] * worldPos.y + vm.m[3][2] * worldPos.z + vm.m[3][3];
+    if (w < 0.001f) return false;
+    float x = vm.m[0][0] * worldPos.x + vm.m[0][1] * worldPos.y + vm.m[0][2] * worldPos.z + vm.m[0][3];
+    float y = vm.m[1][0] * worldPos.x + vm.m[1][1] * worldPos.y + vm.m[1][2] * worldPos.z + vm.m[1][3];
+    screenPos.x = (screenW / 2.0f) * (1.0f + x / w);
+    screenPos.y = (screenH / 2.0f) * (1.0f - y / w);
+    return true;
+}
+
+// ============ OVERLAY WINDOW ============
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_PAINT:
+        ValidateRect(hwnd, nullptr);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool CreateOverlayWindow(HINSTANCE hInstance) {
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = OverlayWndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"RustOverlayClass";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    if (!RegisterClassExW(&wc)) return false;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    g_overlayWnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        wc.lpszClassName,
+        L"Overlay",
+        WS_POPUP,
+        0, 0, screenW, screenH,
+        nullptr, nullptr, hInstance, nullptr);
+
+    if (!g_overlayWnd) return false;
+
+    SetLayeredWindowAttributes(g_overlayWnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
+    MARGINS margins = { -1, -1, -1, -1 };
+    DwmExtendFrameIntoClientArea(g_overlayWnd, &margins);
+
+    ShowWindow(g_overlayWnd, SW_SHOW);
+    UpdateWindow(g_overlayWnd);
+    return true;
+}
+
+bool InitD2D() {
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2dFactory)))
+        return false;
+
+    RECT rc;
+    GetClientRect(g_overlayWnd, &rc);
+    D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+
+    if (FAILED(g_d2dFactory->CreateHwndRenderTarget(
+        D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
+        D2D1::HwndRenderTargetProperties(g_overlayWnd, size),
+        &g_renderTarget)))
+        return false;
+
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(&g_dwriteFactory))))
+        return false;
+
+    if (FAILED(g_dwriteFactory->CreateTextFormat(
+        L"Arial", nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        12.0f, L"en-us", &g_textFormat)))
+        return false;
+
+    g_renderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Red, 1.0f), &g_brush);
+    return true;
+}
+
+void DrawESP() {
+    if (!g_renderTarget || !g_hProcess) return;
+
+    g_renderTarget->BeginDraw();
+    g_renderTarget->Clear(D2D1::ColorF(0, 0, 0, 0));
+
+    RECT rc;
+    GetClientRect(g_overlayWnd, &rc);
+    int screenW = rc.right - rc.left;
+    int screenH = rc.bottom - rc.top;
+
+    // Read view matrix
+    ViewMatrix vm{};
+    uintptr_t vmAddr = g_moduleBase + Offsets::VIEW_MATRIX;
+    if (!ReadMemory(vmAddr, vm)) {
+        g_renderTarget->EndDraw();
+        return;
+    }
+
+    // Read local player
+    uintptr_t localPlayer = 0;
+    uintptr_t lpAddr = g_moduleBase + Offsets::LOCAL_PLAYER;
+    if (!ReadMemory(lpAddr, localPlayer) || !localPlayer) {
+        g_renderTarget->EndDraw();
+        return;
+    }
+    Vector3 localPos = ReadVector3(localPlayer + Offsets::BASEENTITY_POS);
+    int localTeam = 0;
+    ReadMemory(localPlayer + Offsets::BASEENTITY_TEAM, localTeam);
+
+    // Iterate entity list
+    uintptr_t entityListAddr = g_moduleBase + Offsets::ENTITY_LIST;
+    uintptr_t entityList = 0;
+    if (!ReadMemory(entityListAddr, entityList) || !entityList) {
+        g_renderTarget->EndDraw();
+        return;
+    }
+
+    // Standard Rust entity list is an array of BaseNetworkable* with size up to 50000
+    constexpr int MAX_ENTITIES = 50000;
+    for (int i = 0; i < MAX_ENTITIES; i++) {
+        uintptr_t entityPtr = 0;
+        uintptr_t entryAddr = entityList + (i * Offsets::ENTITY_SIZE);
+        if (!ReadMemory(entryAddr, entityPtr) || !entityPtr)
+            continue;
+
+        // Check if player
+        bool isPlayer = false;
+        if (!ReadMemory(entityPtr + Offsets::BASEENTITY_ISPLAYER, isPlayer) || !isPlayer)
+            continue;
+
+        // Skip local player? (optional, often keep to show own position)
+        if (entityPtr == localPlayer)
+            continue;
+
+        int team = 0;
+        ReadMemory(entityPtr + Offsets::BASEENTITY_TEAM, team);
+        if (team == localTeam)
+            continue; // skip teammates
+
+        Vector3 pos = ReadVector3(entityPtr + Offsets::BASEENTITY_POS);
+        float health = 0.0f;
+        ReadMemory(entityPtr + Offsets::BASEENTITY_HEALTH, health);
+        if (health <= 0.0f)
+            continue;
+
+        Vector2 screenPos;
+        if (!WorldToScreen(pos, vm, screenW, screenH, screenPos))
+            continue;
+
+        // Distance
+        float dx = pos.x - localPos.x;
+        float dy = pos.y - localPos.y;
+        float dz = pos.z - localPos.z;
+        float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+        // Draw simple box based on distance (assume player height ~2m)
+        float height = 2.0f;
+        float width = 1.0f;
+        Vector2 headPos;
+        Vector3 headWorld = pos;
+        headWorld.y += height;
+        if (!WorldToScreen(headWorld, vm, screenW, screenH, headPos))
+            continue;
+        float boxHeight = std::abs(screenPos.y - headPos.y);
+        float boxWidth = boxHeight * 0.5f;
+
+        D2D1_RECT_F box = D2D1::RectF(
+            screenPos.x - boxWidth / 2,
+            headPos.y,
+            screenPos.x + boxWidth / 2,
+            screenPos.y
+        );
+
+        // Color based on health
+        D2D1::ColorF color = (health > 50.0f) ? D2D1::ColorF

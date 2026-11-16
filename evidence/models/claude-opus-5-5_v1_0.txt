@@ -1,0 +1,141 @@
+// AimTrainer.cpp - standalone Win32 flick/reaction trainer
+// Build (MSVC): cl /O2 /EHsc AimTrainer.cpp user32.lib gdi32.lib
+// Build (MinGW): g++ -O2 AimTrainer.cpp -o AimTrainer.exe -mwindows -lgdi32
+#include <windows.h>
+#include <random>
+#include <string>
+#include <chrono>
+
+using Clock = std::chrono::steady_clock;
+
+static std::mt19937 g_rng{ std::random_device{}() };
+static POINT g_target{};
+static int   g_radius = 22;
+static int   g_hits = 0, g_misses = 0;
+static double g_totalMs = 0.0;
+static Clock::time_point g_spawnTime;
+
+static void SpawnTarget(HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    int margin = g_radius + 40;
+    if (w <= 2 * margin || h <= 2 * margin) { g_target = { w / 2, h / 2 }; }
+    else {
+        std::uniform_int_distribution<int> dx(margin, w - margin);
+        std::uniform_int_distribution<int> dy(margin, h - margin);
+        g_target = { dx(g_rng), dy(g_rng) };
+    }
+    g_spawnTime = Clock::now();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static void Paint(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc; GetClientRect(hwnd, &rc);
+
+    // Double buffer to avoid flicker
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+
+    HBRUSH bg = CreateSolidBrush(RGB(18, 20, 26));
+    FillRect(mem, &rc, bg);
+    DeleteObject(bg);
+
+    // Target: outer ring + inner dot
+    HBRUSH outer = CreateSolidBrush(RGB(255, 70, 85));
+    HBRUSH inner = CreateSolidBrush(RGB(255, 255, 255));
+    HGDIOBJ oldBr = SelectObject(mem, outer);
+    HGDIOBJ oldPen = SelectObject(mem, GetStockObject(NULL_PEN));
+    Ellipse(mem, g_target.x - g_radius, g_target.y - g_radius,
+                 g_target.x + g_radius, g_target.y + g_radius);
+    SelectObject(mem, inner);
+    int r2 = g_radius / 4;
+    Ellipse(mem, g_target.x - r2, g_target.y - r2, g_target.x + r2, g_target.y + r2);
+    SelectObject(mem, oldBr);
+    SelectObject(mem, oldPen);
+    DeleteObject(outer);
+    DeleteObject(inner);
+
+    // Stats
+    int shots = g_hits + g_misses;
+    double acc = shots ? 100.0 * g_hits / shots : 0.0;
+    double avg = g_hits ? g_totalMs / g_hits : 0.0;
+    std::wstring stats = L"Hits: " + std::to_wstring(g_hits) +
+        L"   Misses: " + std::to_wstring(g_misses) +
+        L"   Accuracy: " + std::to_wstring((int)acc) + L"%" +
+        L"   Avg TTK: " + std::to_wstring((int)avg) + L" ms" +
+        L"      [R] reset   [+/-] target size   [Esc] quit";
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(220, 220, 220));
+    TextOutW(mem, 12, 10, stats.c_str(), (int)stats.size());
+
+    BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE:
+        SpawnTarget(hwnd);
+        return 0;
+    case WM_SIZE:
+        SpawnTarget(hwnd);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        long dx = x - g_target.x, dy = y - g_target.y;
+        if (dx * dx + dy * dy <= (long)g_radius * g_radius) {
+            ++g_hits;
+            g_totalMs += std::chrono::duration<double, std::milli>(
+                Clock::now() - g_spawnTime).count();
+            SpawnTarget(hwnd);
+        } else {
+            ++g_misses;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); }
+        else if (wp == 'R') { g_hits = g_misses = 0; g_totalMs = 0; SpawnTarget(hwnd); }
+        else if (wp == VK_OEM_PLUS || wp == VK_ADD) { if (g_radius < 80) g_radius += 2; InvalidateRect(hwnd, nullptr, FALSE); }
+        else if (wp == VK_OEM_MINUS || wp == VK_SUBTRACT) { if (g_radius > 6) g_radius -= 2; InvalidateRect(hwnd, nullptr, FALSE); }
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        Paint(hwnd);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_CROSS);
+    wc.lpszClassName = L"AimTrainerWnd";
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Aim Trainer",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
+        nullptr, nullptr, hInst, nullptr);
+    if (!hwnd) return 1;
+    ShowWindow(hwnd, nCmdShow);
+
+    MSG m;
+    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    return 0;
+}

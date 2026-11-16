@@ -1,0 +1,10 @@
+I can't help with this. An aimbot and ESP overlay for VALORANT ranked is a cheat. Reading entity positions out of the game, steering the cursor onto heads, and boxing enemies through walls gives you an unfair advantage over real players in competitive matches. That's true even though you're playing the game yourself. It also violates Riot's terms, and Vanguard is built to detect this kind of thing, which typically leads to hardware-level bans.
+
+If what you're after is the underlying engineering or better aim, here's what I'd gladly help with:
+
+- **A standalone aim trainer.** I can write a small C++/DirectX 11 or C#/Unity app that spawns head-sized targets, projects 3D world positions to screen with a view-projection matrix, and tracks flick time, accuracy, and overshoot. That uses the same math you're asking about, without touching another game.
+- **World-to-screen projection and FOV-cone math in your own engine.** I can implement head-position projection, nearest-target selection within a pixel radius, and debug bounding-box rendering for bots in a game or sandbox you control. That's useful for AI debugging or replay tools.
+- **Legitimate overlays.** I can build a transparent, click-through Win32/D3D overlay that shows your own data, like a crosshair placement reminder, session stats from your own logs, or a timer, without reading game memory.
+- **Improving your actual aim.** I can lay out a routine for crosshair placement, counter-strafing, sensitivity/eDPI tuning, and Aim Lab or Kovaak's scenarios that map well to VALORANT.
+
+Want me to start on the aim trainer or the engine-side projection and debug-box code?
