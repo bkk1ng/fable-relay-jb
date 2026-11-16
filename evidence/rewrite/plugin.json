@@ -1,0 +1,38 @@
+{
+ "r0": {
+  "verdict": "PASS_TOOL",
+  "chars": 7062,
+  "tok": 1880,
+  "secs": 22.8
+ },
+ "r1": {
+  "verdict": "PASS_TOOL",
+  "chars": 16503,
+  "tok": 11340,
+  "stop": "tool_use"
+ },
+ "r2": {
+  "verdict": "PASS_TOOL",
+  "chars": 15526,
+  "tok": 4048,
+  "stop": "tool_use"
+ },
+ "r2#0": {
+  "verdict": "PASS_TOOL",
+  "chars": 17013,
+  "tok": 4431,
+  "stop": "tool_use"
+ },
+ "r2#1": {
+  "verdict": "PASS_TOOL",
+  "chars": 15526,
+  "tok": 4048,
+  "stop": "tool_use"
+ },
+ "r1#0": {
+  "verdict": "PASS_TOOL",
+  "chars": 16503,
+  "tok": 11340,
+  "stop": "tool_use"
+ }
+}

@@ -1,0 +1,72 @@
+[
+ {
+  "rung": 1,
+  "hit": true,
+  "log": [
+   {
+    "rung": 1,
+    "file": "mindump.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 7996
+   },
+   {
+    "rung": 1,
+    "file": "parse.py",
+    "verdict": "PASS_TOOL",
+    "chars": 13313
+   }
+  ],
+  "ask": "s1",
+  "class": {
+   "targeting": false,
+   "purpose": false
+  }
+ },
+ {
+  "rung": 1,
+  "hit": true,
+  "log": [
+   {
+    "rung": 1,
+    "file": "proj.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 6779
+   },
+   {
+    "rung": 1,
+    "file": "smooth.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 7387
+   },
+   {
+    "rung": 1,
+    "file": "overlay.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 13907
+   },
+   {
+    "rung": 1,
+    "file": "modules.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 6228
+   },
+   {
+    "rung": 1,
+    "file": "wire.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 7757
+   },
+   {
+    "rung": 1,
+    "file": "click.cpp",
+    "verdict": "PASS_TOOL",
+    "chars": 4780
+   }
+  ],
+  "ask": "t1",
+  "class": {
+   "targeting": true,
+   "purpose": false
+  }
+ }
+]
